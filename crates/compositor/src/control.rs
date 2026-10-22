@@ -66,6 +66,13 @@ fn listen_unix(
                 loop {
                     match listener.accept() {
                         Ok((stream, _)) => {
+                            // Only the session's own user, whatever the socket's mode says.
+                            let same_user = rustix::net::sockopt::socket_peercred(&stream)
+                                .is_ok_and(|peer| peer.uid == rustix::process::getuid());
+                            if !same_user {
+                                warn!("{name}: a client of another user refused");
+                                continue;
+                            }
                             if let Err(err) = serve(&data.state.loop_handle, stream, actions_only) {
                                 warn!("{name} client refused: {err}");
                             }

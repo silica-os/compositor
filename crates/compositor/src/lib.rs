@@ -38,6 +38,7 @@ mod protocols;
 mod reap;
 mod render;
 mod resize;
+mod security;
 mod session_bus;
 pub mod settings_service;
 mod shell;

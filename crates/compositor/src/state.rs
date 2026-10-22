@@ -356,7 +356,8 @@ impl State {
         let data_device_state = DataDeviceState::new::<State>(&dh);
         let data_control_state =
             DataControlState::new::<State, _>(&dh, None, crate::handlers::clipboard_manager_client);
-        let layer_shell_state = WlrLayerShellState::new::<State>(&dh);
+        let layer_shell_state =
+            WlrLayerShellState::new_with_filter::<State, _>(&dh, crate::security::unsandboxed);
         let viewporter_state = ViewporterState::new::<State>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<State>(&dh);
         let xdg_foreign_state = smithay::wayland::xdg_foreign::XdgForeignState::new::<State>(&dh);
@@ -389,10 +390,11 @@ impl State {
             // The process on the other side of the socket tells whether it is a shell
             // component: it is read here, once, because the global filters cannot query the
             // display while it is locked by the dispatch.
-            let shell = crate::shell::stream_is_shell(&stream);
             let pid = rustix::net::sockopt::socket_peercred(&stream)
                 .ok()
                 .map(|credentials| credentials.pid.as_raw_nonzero().get());
+            let shell = crate::shell::stream_is_shell(&stream)
+                && pid.is_some_and(crate::security::system_binary);
             if let Err(err) = data.state.display_handle.insert_client(
                 stream,
                 Arc::new(ClientState {
@@ -631,6 +633,8 @@ pub struct ClientState {
     pub shell: bool,
     /// The client process (SO_PEERCRED), for force quit.
     pub pid: Option<i32>,
+    /// The sandbox it came through (wp-security-context), if any (`security.rs`).
+    pub security_context: Option<smithay::wayland::security_context::SecurityContext>,
 }
 
 impl ClientData for ClientState {

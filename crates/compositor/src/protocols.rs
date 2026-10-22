@@ -77,6 +77,8 @@ pub struct Protocols {
     pub system_bell: XdgSystemBellState,
     pub tablet: smithay::wayland::tablet_manager::TabletManagerState,
     pub fractional_scale: smithay::wayland::fractional_scale::FractionalScaleManagerState,
+    /// wp-security-context: only apps outside a sandbox create contexts (`security.rs`).
+    pub security_context: smithay::wayland::security_context::SecurityContextState,
     /// linux-drm-syncobj: only on a DRM device that supports it (drm.rs).
     pub syncobj: Option<smithay::wayland::drm_syncobj::DrmSyncobjState>,
     /// Surfaces with a live idle inhibitor: while one is mapped, the display stays on.
@@ -102,9 +104,14 @@ impl Protocols {
             relative_pointer: RelativePointerManagerState::new::<State>(dh),
             pointer_gestures: PointerGesturesState::new::<State>(dh),
             text_input: TextInputManagerState::new::<State>(dh),
-            input_method: InputMethodManagerState::new::<State, _>(dh, |_| true),
-            // Any client for now; wp-security-context restricts it (C6).
-            virtual_keyboard: VirtualKeyboardManagerState::new::<State, _>(dh, |_| true),
+            input_method: InputMethodManagerState::new::<State, _>(
+                dh,
+                crate::security::unsandboxed,
+            ),
+            virtual_keyboard: VirtualKeyboardManagerState::new::<State, _>(
+                dh,
+                crate::security::unsandboxed,
+            ),
             idle_inhibit: IdleInhibitManagerState::new::<State>(dh),
             keyboard_shortcuts_inhibit: KeyboardShortcutsInhibitState::new::<State>(dh),
             toplevel_icon: XdgToplevelIconManager::new::<State>(dh),
@@ -112,6 +119,10 @@ impl Protocols {
             system_bell: XdgSystemBellState::new::<State>(dh),
             tablet: smithay::wayland::tablet_manager::TabletManagerState::new::<State>(dh),
             syncobj: None,
+            security_context: smithay::wayland::security_context::SecurityContextState::new::<
+                State,
+                _,
+            >(dh, crate::security::unsandboxed),
             fractional_scale: smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<
                 State,
             >(dh),

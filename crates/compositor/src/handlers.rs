@@ -544,7 +544,9 @@ impl DataControlHandler for State {
 pub fn clipboard_manager_client(client: &Client) -> bool {
     client
         .get_data::<ClientState>()
+        .filter(|state| state.security_context.is_none())
         .and_then(|state| state.pid)
+        .filter(|pid| crate::security::system_binary(*pid))
         .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok())
         .and_then(|exe| exe.file_name().map(|name| name == "silica-daemon"))
         .unwrap_or(false)
