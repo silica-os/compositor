@@ -1106,6 +1106,7 @@ impl State {
             _ => None,
         };
         let lock_surfaces = self.lock_wl_surfaces();
+        let accessibility = self.accessibility;
         let Backend::Drm(backend) = &mut self.backend else {
             return;
         };
@@ -1187,6 +1188,19 @@ impl State {
             );
             elements.splice(0..0, cursor);
         }
+        let origin = self
+            .space
+            .output_geometry(&self.output)
+            .map(|g| g.loc.to_f64())
+            .unwrap_or_default();
+        let elements = crate::accessibility::post_process(
+            &mut backend.renderer,
+            &self.output,
+            elements,
+            pointer.map(|p| p - origin),
+            clear_color,
+            &accessibility,
+        );
         if primary_ready && let Some(surface) = &mut backend.surface {
             let queued = render_surface(
                 &mut backend.renderer,
@@ -1245,6 +1259,19 @@ impl State {
                 );
                 elements.splice(0..0, cursor);
             }
+            let origin = self
+                .space
+                .output_geometry(&extra.output)
+                .map(|g| g.loc.to_f64())
+                .unwrap_or_default();
+            let elements = crate::accessibility::post_process(
+                &mut backend.renderer,
+                &extra.output,
+                elements,
+                pointer.map(|p| p - origin),
+                clear_color,
+                &accessibility,
+            );
             match render_surface(
                 &mut backend.renderer,
                 &mut extra.surface,

@@ -610,6 +610,9 @@ impl State {
         if touched("accessibility.cursorSize") {
             self.apply_theme_config();
         }
+        if touched("accessibility.") {
+            self.apply_accessibility_config();
+        }
         if !changed.is_empty() {
             self.wake();
         }
@@ -752,6 +755,7 @@ impl State {
         self.apply_dock_config();
         self.apply_lock_config();
         self.apply_displays_config();
+        self.apply_accessibility_config();
     }
 
     /// `keyboard.*`: the repeat goes to every bound keyboard (`wl_keyboard.repeat_info`), a

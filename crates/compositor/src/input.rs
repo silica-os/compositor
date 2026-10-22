@@ -379,7 +379,8 @@ impl State {
 
     /// A key, real or synthetic (`input.key`): first the catalog shortcuts, which run their
     /// command and do not reach the app; the rest goes to the focused surface.
-    pub fn handle_key(&mut self, code: Keycode, state: KeyState, time: u32) {
+    /// A key after the accessibility filters (`accessibility.rs`): shortcuts, then the client.
+    pub fn deliver_key(&mut self, code: Keycode, state: KeyState, time: u32) {
         let code = self.logo_key.remap(code);
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;

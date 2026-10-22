@@ -1,5 +1,6 @@
 //! The compositor, the Wayland compositor of Silica.
 
+mod accessibility;
 mod app_frames;
 mod app_hide;
 mod app_menu;

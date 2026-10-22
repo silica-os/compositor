@@ -9,6 +9,7 @@ pub mod backdrop;
 pub mod border;
 pub mod cache;
 pub mod corners;
+pub mod filter;
 pub mod genie;
 pub mod glass;
 pub mod glass_profile;
@@ -35,6 +36,8 @@ pub struct Shaders {
     pub tone: Option<GlesTexProgram>,
     /// The funnel deformation of minimizing into the Dock.
     pub genie: Option<GlesTexProgram>,
+    /// The Accessibility display filters (invert, grayscale, contrast).
+    pub filter: Option<GlesTexProgram>,
 }
 
 /// The renderer programs, compiled on the first request and kept in the EGL context.
@@ -83,6 +86,12 @@ pub fn shaders(renderer: &mut GlesRenderer) -> Shaders {
         &backdrop::UNIFORMS,
     );
     let genie = compile_texture(renderer, "genie", genie::SHADER, &genie::UNIFORMS);
+    let filter = compile_texture(
+        renderer,
+        "display filter",
+        filter::SHADER,
+        &filter::UNIFORMS,
+    );
     let shaders = Shaders {
         corners,
         shadow,
@@ -91,6 +100,7 @@ pub fn shaders(renderer: &mut GlesRenderer) -> Shaders {
         glass,
         tone,
         genie,
+        filter,
     };
     renderer
         .egl_context()

@@ -62,6 +62,8 @@ render_elements! {
     Thumbnail=CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
     /// A blurred capture: the Panorama wallpaper, the spaces bar material.
     Blurred=compositor_render::backdrop::BlurredElement,
+    /// The whole frame zoomed or filtered (`accessibility.rs`).
+    Filtered=smithay::backend::renderer::gles::element::TextureShaderElement,
 }
 
 /// The glass of the spaces bar (Glass/Thick, over the wallpaper only), between frames.

@@ -166,6 +166,9 @@ pub struct State {
     pub locked_focus: Option<smithay::desktop::Window>,
     /// ext-session-lock: the manager's state and the client that holds the lock.
     pub session_lock_state: smithay::wayland::session_lock::SessionLockManagerState,
+    /// `accessibility.*` and the keys it holds back (accessibility.rs).
+    pub accessibility: crate::accessibility::AccessibilityConfig,
+    pub key_access: crate::accessibility::KeyAccess,
     /// The standard protocols beyond the core (protocols.rs).
     pub protocols: crate::protocols::Protocols,
     pub lock_client: crate::lock::LockClient,
@@ -494,6 +497,8 @@ impl State {
             locked_focus: None,
             session_lock_state,
             protocols,
+            accessibility: Default::default(),
+            key_access: Default::default(),
             lock_client: crate::lock::LockClient::default(),
             lock_config: crate::config::LockConfig::default(),
             saver_config: crate::config::SaverConfig::default(),
