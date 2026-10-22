@@ -76,6 +76,7 @@ pub struct Protocols {
     pub toplevel_tag: XdgToplevelTagManager,
     pub system_bell: XdgSystemBellState,
     pub tablet: smithay::wayland::tablet_manager::TabletManagerState,
+    pub fractional_scale: smithay::wayland::fractional_scale::FractionalScaleManagerState,
     /// linux-drm-syncobj: only on a DRM device that supports it (drm.rs).
     pub syncobj: Option<smithay::wayland::drm_syncobj::DrmSyncobjState>,
     /// Surfaces with a live idle inhibitor: while one is mapped, the display stays on.
@@ -111,6 +112,9 @@ impl Protocols {
             system_bell: XdgSystemBellState::new::<State>(dh),
             tablet: smithay::wayland::tablet_manager::TabletManagerState::new::<State>(dh),
             syncobj: None,
+            fractional_scale: smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<
+                State,
+            >(dh),
             idle_inhibitors: Vec::new(),
             client_gesture: false,
         }
@@ -119,16 +123,28 @@ impl Protocols {
 
 impl State {
     /// After a frame: the fifo and commit-timing barriers of every surface are signalled, so
-    /// the commits waiting on them apply.
+    /// the commits waiting on them apply. Each surface also learns the scale and transform of
+    /// the display it is on (wp-fractional-scale, wl_surface v6).
     pub fn signal_frame_barriers(&mut self) {
         let now = self.protocols.clock.now();
         let mut surfaces = Vec::new();
-        let mut collect = |surface: &WlSurface| {
+        let mut collect = |surface: &WlSurface, output: &smithay::output::Output| {
+            let scale = output.current_scale();
+            let transform = output.current_transform();
             compositor::with_surface_tree_downward(
                 surface,
                 (),
                 |_, _, _| compositor::TraversalAction::DoChildren(()),
                 |surface, states, _| {
+                    smithay::wayland::fractional_scale::with_fractional_scale(states, |fs| {
+                        fs.set_preferred_scale(scale.fractional_scale());
+                    });
+                    compositor::send_surface_state(
+                        surface,
+                        states,
+                        scale.integer_scale(),
+                        transform,
+                    );
                     let mut signalled = false;
                     if let Some(barrier) = states
                         .cached_state
@@ -153,17 +169,23 @@ impl State {
             );
         };
         for window in self.space.elements() {
+            let output = self
+                .space
+                .outputs_for_element(window)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| self.output.clone());
             if let Some(surface) = window.wl_surface() {
-                collect(&surface);
+                collect(&surface, &output);
             }
         }
         for (window, _) in &self.hidden {
             if let Some(surface) = window.wl_surface() {
-                collect(&surface);
+                collect(&surface, &self.output);
             }
         }
         for layer in smithay::desktop::layer_map_for_output(&self.output).layers() {
-            collect(layer.wl_surface());
+            collect(layer.wl_surface(), &self.output);
         }
         let dh = self.display_handle.clone();
         for surface in surfaces {
@@ -400,6 +422,8 @@ impl smithay::wayland::drm_syncobj::DrmSyncobjHandler for State {
     }
 }
 
+impl smithay::wayland::fractional_scale::FractionalScaleHandler for State {}
+
 impl PrimarySelectionHandler for State {
     fn primary_selection_state(&self) -> &PrimarySelectionState {
         &self.protocols.primary_selection
@@ -557,3 +581,4 @@ smithay::delegate_xdg_toplevel_tag!(State);
 smithay::delegate_xdg_system_bell!(State);
 smithay::delegate_tablet_manager!(State);
 smithay::delegate_drm_syncobj!(State);
+smithay::delegate_fractional_scale!(State);

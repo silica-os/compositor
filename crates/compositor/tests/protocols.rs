@@ -54,6 +54,7 @@ const EXPECTED: &[&str] = &[
     "xdg_toplevel_tag_manager_v1",
     "xdg_system_bell_v1",
     "zwp_tablet_manager_v2",
+    "wp_fractional_scale_manager_v1",
 ];
 
 #[test]

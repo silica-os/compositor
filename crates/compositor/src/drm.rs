@@ -95,6 +95,9 @@ pub struct DrmBackend {
     /// The pointer devices, to apply the `input.*` settings again when it changes.
     devices: Vec<smithay::reexports::input::Device>,
     surface: Option<OutputSurface>,
+    /// The other connected displays, right of the primary one.
+    extras: Vec<ExtraOutput>,
+    displaced: Vec<Displaced>,
     /// A frame is queued for scanout and waits for its vblank.
     pending: bool,
     /// Frames built in a row with nothing to draw (see [`frame_due`]).
@@ -114,6 +117,23 @@ pub struct DrmBackend {
             smithay::backend::renderer::element::Id,
         ),
     >,
+}
+
+/// A display beside the primary one: its own output, global and swapchain. The menu bar,
+/// the Dock and the lock screen stay on the primary display.
+struct ExtraOutput {
+    output: Output,
+    global: smithay::reexports::wayland_server::backend::GlobalId,
+    surface: OutputSurface,
+    /// A frame is queued for scanout and waits for its vblank.
+    pending: bool,
+}
+
+/// A window moved off a display that went away: where it was, to go back when it returns.
+struct Displaced {
+    window: smithay::desktop::Window,
+    display: String,
+    location: smithay::utils::Point<i32, smithay::utils::Logical>,
 }
 
 /// The connector driven by the output, with its swapchain.
@@ -161,8 +181,16 @@ fn preferred_mode(
 
 /// The first connected connector with a mode and a usable crtc.
 fn choose(drm: &DrmDevice) -> Option<Choice> {
+    connected(drm).into_iter().next()
+}
+
+/// Every connected connector with a mode, each with a crtc of its own.
+fn connected(drm: &DrmDevice) -> Vec<Choice> {
     let device = drm.device_fd();
-    let resources = device.resource_handles().ok()?;
+    let Ok(resources) = device.resource_handles() else {
+        return Vec::new();
+    };
+    let mut list: Vec<Choice> = Vec::new();
     for &handle in resources.connectors() {
         let Ok(info) = device.get_connector(handle, false) else {
             continue;
@@ -178,12 +206,12 @@ fn choose(drm: &DrmDevice) -> Option<Choice> {
             .iter()
             .filter_map(|&encoder| device.get_encoder(encoder).ok())
             .flat_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()))
-            .find(|crtc| drm.crtcs().contains(crtc));
+            .find(|crtc| drm.crtcs().contains(crtc) && !list.iter().any(|c| c.crtc == *crtc));
         let Some(crtc) = crtc else {
             continue;
         };
         let (w, h) = info.size().unwrap_or((0, 0));
-        return Some(Choice {
+        list.push(Choice {
             connector: handle,
             crtc,
             mode,
@@ -194,7 +222,60 @@ fn choose(drm: &DrmDevice) -> Option<Choice> {
             ),
         });
     }
-    None
+    list
+}
+
+/// A Wayland output for a display, in its preferred mode.
+fn display_output(choice: &Choice) -> Output {
+    let output = Output::new(
+        choice.name.clone(),
+        PhysicalProperties {
+            size: choice.size_mm.into(),
+            subpixel: Subpixel::Unknown,
+            make: "Silica".to_owned(),
+            model: choice.name.clone(),
+        },
+    );
+    let mode = Mode::from(choice.mode);
+    output.change_current_state(Some(mode), Some(Transform::Normal), None, None);
+    output.set_preferred(mode);
+    output
+}
+
+/// Renders `elements` into the next buffer of `surface` and queues it; false when nothing
+/// changed.
+fn render_surface(
+    renderer: &mut GlesRenderer,
+    surface: &mut OutputSurface,
+    elements: &[crate::render::OutputElement],
+    clear_color: [f32; 4],
+    feedback: Option<OutputPresentationFeedback>,
+) -> Result<bool, String> {
+    let (mut dmabuf, age) = surface
+        .gbm
+        .next_buffer()
+        .map_err(|e| format!("next buffer: {e}"))?;
+    let mut framebuffer = renderer
+        .bind(&mut dmabuf)
+        .map_err(|e| format!("bind: {e}"))?;
+    let result = surface
+        .damage_tracker
+        .render_output(
+            renderer,
+            &mut framebuffer,
+            tracker_age(age),
+            elements,
+            clear_color,
+        )
+        .map_err(|e| format!("render: {e:?}"))?;
+    let Some(damage) = result.damage.cloned() else {
+        return Ok(false);
+    };
+    surface
+        .gbm
+        .queue_buffer(Some(result.sync), Some(damage), feedback)
+        .map_err(|e| format!("queue: {e}"))?;
+    Ok(true)
 }
 
 fn create_surface(
@@ -305,6 +386,8 @@ pub fn init_drm(
         libinput: libinput.clone(),
         devices: Vec::new(),
         surface,
+        extras: Vec::new(),
+        displaced: Vec::new(),
         pending: false,
         quiet: 0,
         last_frame: Instant::now(),
@@ -321,6 +404,8 @@ pub fn init_drm(
     )?;
     state.software_renderer = software;
     state.apply_system_keymap();
+    // The other displays already connected.
+    state.drm_changed_inner();
     // Explicit sync (linux-drm-syncobj), when the kernel driver can signal eventfds.
     if smithay::wayland::drm_syncobj::supports_syncobj_eventfd(&syncobj_fd) {
         let dh = display.handle();
@@ -552,6 +637,13 @@ impl State {
             return;
         };
         if surface.crtc != crtc {
+            if let Some(extra) = backend.extras.iter_mut().find(|e| e.surface.crtc == crtc) {
+                if let Err(err) = extra.surface.gbm.frame_submitted() {
+                    warn!("DRM: frame submitted on {}: {err}", extra.output.name());
+                }
+                extra.pending = false;
+                self.render_drm();
+            }
             return;
         }
         let feedback = match surface.gbm.frame_submitted() {
@@ -575,16 +667,29 @@ impl State {
         }
     }
 
-    /// Follows the connectors: the output moves to the first connected one.
+    /// Follows the connectors: the primary output stays on its display while it is connected,
+    /// otherwise it moves to the first one; the others become extra outputs.
     fn drm_changed_inner(&mut self) {
         let output = self.output.clone();
         let Some(backend) = self.drm_backend() else {
             return;
         };
-        let choice = choose(&backend.drm);
+        let mut all = connected(&backend.drm);
         let current = backend.surface.as_ref().map(|s| (s.connector, s.crtc));
+        let index = all
+            .iter()
+            .position(|c| Some((c.connector, c.crtc)) == current)
+            .unwrap_or(0);
+        let choice = (index < all.len()).then(|| all.remove(index));
+        // An extra display that becomes the primary one gives up its swapchain first.
+        if let Some(choice) = &choice {
+            backend
+                .extras
+                .retain(|e| e.surface.connector != choice.connector);
+        }
         // The same display: it keeps the mode chosen in Settings.
         if choice.as_ref().map(|c| (c.connector, c.crtc)) == current {
+            self.drm_sync_extras(all);
             return;
         }
         backend.surface = None;
@@ -617,6 +722,142 @@ impl State {
         // A display plugged in: its saved mode, scale and rotation, and the night light.
         self.apply_displays_config();
         let _ = self.drm_apply_gamma();
+        self.drm_sync_extras(all);
+    }
+
+    /// The extra displays follow the connectors: new ones get an output right of the others,
+    /// the windows of a display that went away move to the primary one, and come back when it
+    /// is plugged in again.
+    fn drm_sync_extras(&mut self, connected: Vec<Choice>) {
+        let dh = self.display_handle.clone();
+        let Some(backend) = self.drm_backend() else {
+            return;
+        };
+        let mut removed = Vec::new();
+        backend.extras.retain(|extra| {
+            let keep = connected
+                .iter()
+                .any(|c| c.connector == extra.surface.connector && c.crtc == extra.surface.crtc);
+            if !keep {
+                removed.push((extra.output.clone(), extra.global.clone()));
+            }
+            keep
+        });
+        let mut added = Vec::new();
+        for choice in &connected {
+            if backend
+                .extras
+                .iter()
+                .any(|e| e.surface.connector == choice.connector)
+            {
+                continue;
+            }
+            let output = display_output(choice);
+            match create_surface(
+                &mut backend.drm,
+                &backend.gbm,
+                &backend.renderer,
+                &output,
+                choice,
+            ) {
+                Ok(surface) => {
+                    let global = output.create_global::<State>(&dh);
+                    info!(
+                        "display {} added: {}x{}",
+                        choice.name,
+                        choice.mode.size().0,
+                        choice.mode.size().1
+                    );
+                    backend.extras.push(ExtraOutput {
+                        output: output.clone(),
+                        global,
+                        surface,
+                        pending: false,
+                    });
+                    added.push(output);
+                }
+                Err(err) => warn!("{err}"),
+            }
+        }
+        if removed.is_empty() && added.is_empty() {
+            return;
+        }
+        // Windows on a display that goes away: remembered, then moved to the primary one.
+        for (output, _) in &removed {
+            let Some(area) = self.space.output_geometry(output) else {
+                continue;
+            };
+            let windows: Vec<_> = self
+                .space
+                .elements()
+                .filter_map(|w| {
+                    let location = self.space.element_location(w)?;
+                    area.contains(location)
+                        .then(|| (w.clone(), location - area.loc))
+                })
+                .collect();
+            let primary = self.usable_area();
+            for (window, offset) in windows {
+                let x = primary.loc.x + offset.x.clamp(0, (primary.size.w - 100).max(0));
+                let y = primary.loc.y + offset.y.clamp(0, (primary.size.h - 100).max(0));
+                self.space.map_element(window.clone(), (x, y), false);
+                if let Some(backend) = self.drm_backend() {
+                    backend.displaced.push(Displaced {
+                        window,
+                        display: output.name(),
+                        location: offset,
+                    });
+                }
+            }
+        }
+        for (output, global) in removed {
+            info!("display {} removed", output.name());
+            self.space.unmap_output(&output);
+            dh.remove_global::<State>(global);
+        }
+        self.layout_extra_outputs();
+        // A display back: its windows go back where they were.
+        for output in added {
+            let Some(area) = self.space.output_geometry(&output) else {
+                continue;
+            };
+            let Some(backend) = self.drm_backend() else {
+                return;
+            };
+            let name = output.name();
+            let (back, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut backend.displaced)
+                .into_iter()
+                .partition(|d| d.display == name);
+            backend.displaced = rest;
+            for displaced in back {
+                if smithay::utils::IsAlive::alive(&displaced.window) {
+                    self.space
+                        .map_element(displaced.window, area.loc + displaced.location, false);
+                }
+            }
+        }
+        self.redraw = true;
+    }
+
+    /// The extra outputs side by side, right of the primary one, top edges aligned.
+    fn layout_extra_outputs(&mut self) {
+        let outputs: Vec<Output> = match self.drm_backend() {
+            Some(backend) => backend.extras.iter().map(|e| e.output.clone()).collect(),
+            None => return,
+        };
+        let mut x = self
+            .space
+            .output_geometry(&self.output)
+            .map(|g| g.loc.x + g.size.w)
+            .unwrap_or(0);
+        for output in outputs {
+            self.space.map_output(&output, (x, 0));
+            x += self
+                .space
+                .output_geometry(&output)
+                .map(|g| g.size.w)
+                .unwrap_or(0);
+        }
     }
 
     /// Every connected connector, the driven one enabled.
@@ -627,6 +868,18 @@ impl State {
         let device = backend.drm.device_fd();
         let resources = device.resource_handles().ok()?;
         let driven = backend.surface.as_ref().map(|s| (s.connector, s.mode));
+        let extras: Vec<_> = backend
+            .extras
+            .iter()
+            .map(|e| {
+                (
+                    e.surface.connector,
+                    e.surface.mode,
+                    e.output.current_scale().fractional_scale(),
+                    e.output.current_transform(),
+                )
+            })
+            .collect();
         let mut list = Vec::new();
         for &handle in resources.connectors() {
             let Ok(info) = device.get_connector(handle, false) else {
@@ -642,10 +895,18 @@ impl State {
                 .map(|m| crate::displays::mode_info(Mode::from(*m), Some(*m) == preferred))
                 .collect();
             let (make, model, serial) = edid(device, handle).unwrap_or_default();
-            let enabled = driven.is_some_and(|(c, _)| c == handle);
+            let primary = driven.is_some_and(|(c, _)| c == handle);
+            let extra = extras.iter().find(|(c, ..)| *c == handle);
+            let enabled = primary || extra.is_some();
             let current = driven
                 .filter(|(c, _)| *c == handle)
-                .map(|(_, m)| crate::displays::mode_info(Mode::from(m), Some(m) == preferred));
+                .map(|(_, m)| m)
+                .or(extra.map(|(_, m, ..)| *m))
+                .map(|m| crate::displays::mode_info(Mode::from(m), Some(m) == preferred));
+            let (scale, transform) = match extra {
+                Some((_, _, scale, transform)) => (*scale, *transform),
+                None => (scale, transform),
+            };
             let (w, h) = info.size().unwrap_or((0, 0));
             list.push(crate::displays::OutputInfo {
                 connector: format!("{}-{}", info.interface().as_str(), info.interface_id()),
@@ -661,7 +922,7 @@ impl State {
                     Transform::Normal
                 },
                 enabled,
-                primary: enabled,
+                primary,
                 size_mm: (
                     i32::try_from(w).unwrap_or_default(),
                     i32::try_from(h).unwrap_or_default(),
@@ -801,13 +1062,16 @@ impl State {
     pub fn render_drm(&mut self) {
         let now = Instant::now();
         let display_off = self.display_off;
-        let ready = self.drm_backend().is_some_and(|backend| {
-            !display_off
-                && !backend.pending
-                && backend.surface.is_some()
-                && backend.session.is_active()
-        });
-        if !ready {
+        let (primary_ready, extras_ready) = self
+            .drm_backend()
+            .filter(|backend| !display_off && backend.session.is_active())
+            .map_or((false, false), |backend| {
+                (
+                    !backend.pending && backend.surface.is_some(),
+                    backend.extras.iter().any(|e| !e.pending),
+                )
+            });
+        if !primary_ready && !extras_ready {
             // Clients still get their frame callbacks, at the idle rate.
             self.send_frames();
             self.signal_frame_barriers();
@@ -923,49 +1187,73 @@ impl State {
             );
             elements.splice(0..0, cursor);
         }
-        let Some(surface) = &mut backend.surface else {
-            return;
-        };
-        let queued = (|| -> Result<bool, String> {
-            let (mut dmabuf, age) = surface
-                .gbm
-                .next_buffer()
-                .map_err(|e| format!("next buffer: {e}"))?;
-            let mut framebuffer = backend
-                .renderer
-                .bind(&mut dmabuf)
-                .map_err(|e| format!("bind: {e}"))?;
-            let result = surface
-                .damage_tracker
-                .render_output(
-                    &mut backend.renderer,
-                    &mut framebuffer,
-                    tracker_age(age),
-                    &elements,
-                    clear_color,
-                )
-                .map_err(|e| format!("render: {e:?}"))?;
-            let Some(damage) = result.damage.cloned() else {
-                return Ok(false);
-            };
-            surface
-                .gbm
-                .queue_buffer(Some(result.sync), Some(damage), Some(feedback))
-                .map_err(|e| format!("queue: {e}"))?;
-            Ok(true)
-        })();
-        match queued {
-            Ok(queued) => {
-                backend.pending = queued;
-                backend.quiet = if queued {
-                    0
-                } else {
-                    backend.quiet.saturating_add(1)
-                };
+        if primary_ready && let Some(surface) = &mut backend.surface {
+            let queued = render_surface(
+                &mut backend.renderer,
+                surface,
+                &elements,
+                clear_color,
+                Some(feedback),
+            );
+            match queued {
+                Ok(queued) => {
+                    backend.pending = queued;
+                    backend.quiet = if queued {
+                        0
+                    } else {
+                        backend.quiet.saturating_add(1)
+                    };
+                }
+                Err(err) => {
+                    backend.quiet = 0;
+                    warn!("DRM frame: {err}");
+                }
             }
-            Err(err) => {
-                backend.quiet = 0;
-                warn!("DRM frame: {err}");
+        }
+        // The extra displays: the same scene from their place in the space, without the lock
+        // surface (black while locked) and without Panorama, which lives on the primary one.
+        let context = crate::render::RenderContext {
+            lock_surfaces: context.lock_surfaces.as_ref().map(|_| Vec::new()),
+            panorama: None,
+            ..context
+        };
+        for extra in backend.extras.iter_mut().filter(|e| !e.pending) {
+            let mut elements = crate::render::output_elements(
+                &mut backend.renderer,
+                &self.space,
+                &extra.output,
+                &context,
+            );
+            if let Some(location) = pointer
+                && let Some(area) = self.space.output_geometry(&extra.output)
+                && area.to_f64().contains(location)
+            {
+                let named = themed
+                    .as_ref()
+                    .and_then(|(key, _)| backend.cursors.get(key))
+                    .map(|(texture, hotspot, id)| (texture, *hotspot, Some(id.clone())))
+                    .or(backend
+                        .cursor
+                        .as_ref()
+                        .map(|texture| (texture, (0, 0), None)));
+                let cursor = crate::cursor::elements(
+                    &mut backend.renderer,
+                    &cursor_status,
+                    named,
+                    location - area.loc.to_f64(),
+                    extra.output.current_scale().fractional_scale(),
+                );
+                elements.splice(0..0, cursor);
+            }
+            match render_surface(
+                &mut backend.renderer,
+                &mut extra.surface,
+                &elements,
+                clear_color,
+                None,
+            ) {
+                Ok(queued) => extra.pending = queued,
+                Err(err) => warn!("DRM frame on {}: {err}", extra.output.name()),
             }
         }
         backend.last_frame = now;

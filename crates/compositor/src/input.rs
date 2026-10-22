@@ -498,6 +498,19 @@ impl State {
             .is_some_and(|(layer, _)| layer.namespace() != "menubar")
     }
 
+    /// A point kept on the displays: inside the one it is on, otherwise on the nearest.
+    pub fn clamp_to_outputs(&self, point: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
+        let areas = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output));
+        areas.map(|area| clamp_to(point, area)).min_by(|a, b| {
+            let da = (a.x - point.x).powi(2) + (a.y - point.y).powi(2);
+            let db = (b.x - point.x).powi(2) + (b.y - point.y).powi(2);
+            da.total_cmp(&db)
+        })
+    }
+
     /// A gesture event for the app under the pointer, framed.
     fn client_gesture(&mut self, send: impl FnOnce(&mut Self, &PointerHandle<Self>)) {
         if self.locked {
@@ -536,14 +549,13 @@ impl State {
             // Relative motion (a mouse or touchpad through libinput): from where the pointer
             // is, kept inside the output.
             InputEvent::PointerMotion { event } => {
-                let (Some(pointer), Some(geometry)) = (
-                    self.seat.get_pointer(),
-                    self.space.output_geometry(&self.output),
-                ) else {
+                let Some(pointer) = self.seat.get_pointer() else {
                     return;
                 };
                 let from = pointer.current_location();
-                let location = clamp_to(from + event.delta(), geometry);
+                let Some(location) = self.clamp_to_outputs(from + event.delta()) else {
+                    return;
+                };
                 let location = self.constrained_motion(from, location);
                 // Games and 3D views read the unclamped movement (relative-pointer).
                 let focus = self.surface_under(from);
