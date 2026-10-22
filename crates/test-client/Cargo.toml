@@ -1,0 +1,16 @@
+[package]
+name = "silica-test-client"
+description = "A Wayland test client: an xdg-shell window that draws a solid color on every frame"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+rustix = { version = "1", features = ["fs"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+
+[lints]
+workspace = true

@@ -1254,6 +1254,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "silica-test-client"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.5",
+ "wayland-client",
+ "wayland-protocols",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

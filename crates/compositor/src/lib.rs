@@ -41,6 +41,7 @@ pub mod settings_service;
 mod shell;
 pub mod state;
 mod system;
+mod systemd;
 mod thumbnail_row;
 mod transient;
 mod window_appearance;
@@ -223,6 +224,7 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         warn!("actions socket {}: {err}", path.display());
     }
     std::io::stdout().flush()?;
+    systemd::announce(&socket);
     for command in &options.spawn {
         if let Err(err) = compositor.state.launch(command) {
             warn!("{err}");
@@ -245,5 +247,6 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             warn!("client flush failed: {err}");
         }
     })?;
+    systemd::stopping();
     Ok(())
 }
