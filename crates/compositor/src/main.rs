@@ -41,10 +41,11 @@ fn main() -> ExitCode {
 }
 
 /// When no GPU renders (no Mesa driver for the DRM device, or virtio-gpu without 3D), Mesa falls
-/// back to llvmpipe, whose shaders are machine code generated at run time: IPE refuses to execute
-/// anonymous memory, so llvmpipe crashes. softpipe interprets the shaders instead.
-/// `GALLIUM_DRIVER` picks only the software driver; hardware drivers ignore it. The clients the
-/// compositor starts inherit it. Called while the process has one thread.
+/// back to llvmpipe, whose shaders are machine code generated at run time. JIT is an entitlement
+/// on Silica (SELinux `execmem`, per domain) and the compositor does not hold it, so softpipe,
+/// which interprets the shaders, renders instead. `GALLIUM_DRIVER` picks only the software
+/// driver; hardware drivers ignore it. The clients the compositor starts inherit it. Called while
+/// the process has one thread.
 #[cfg(feature = "drm")]
 #[allow(unsafe_code)]
 fn software_rasterizer_without_jit() {

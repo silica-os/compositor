@@ -3,10 +3,14 @@
 //!
 //! ```text
 //! silica-test-client [--color RRGGBB] [--size WxH] [--seconds N]
+//! silica-test-client --jit
 //! ```
 //!
 //! It prints `configured WxH` when the window is mapped, then `frames N` once per second, and
 //! exits after `--seconds` (default: until the window is closed).
+//!
+//! `--jit` maps no window: it runs code from anonymous memory, as a JIT does, and exits 0 if
+//! the kernel allowed it.
 
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -44,6 +48,15 @@ struct State {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--jit") {
+        return match jit() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("silica-test-client: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let options = match parse(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(err) => {
@@ -58,6 +71,49 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Writes `mov eax, 42; ret` to anonymous memory, makes it executable and calls it. IPE lets
+/// this through; SELinux's `execmem` decides it per domain.
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+fn jit() -> Result<(), String> {
+    use rustix::mm::{MapFlags, MprotectFlags, ProtFlags, mmap_anonymous, mprotect, munmap};
+    const CODE: [u8; 6] = [0xb8, 42, 0, 0, 0, 0xc3];
+    const LEN: usize = 4096;
+    // SAFETY: a new private mapping, at an address the kernel picks.
+    let page = unsafe {
+        mmap_anonymous(
+            std::ptr::null_mut(),
+            LEN,
+            ProtFlags::READ | ProtFlags::WRITE,
+            MapFlags::PRIVATE,
+        )
+    }
+    .map_err(|e| format!("mmap: {e}"))?;
+    // SAFETY: the mapping is writable and LEN bytes long, longer than CODE.
+    unsafe { std::ptr::copy_nonoverlapping(CODE.as_ptr(), page.cast::<u8>(), CODE.len()) };
+    // SAFETY: the mapping is ours and LEN bytes long.
+    let result = unsafe { mprotect(page, LEN, MprotectFlags::READ | MprotectFlags::EXEC) }
+        .map_err(|e| format!("mprotect to executable: {e}"))
+        .map(|()| {
+            // SAFETY: the page holds a whole C function that takes nothing and returns 42.
+            let code = unsafe {
+                std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn() -> u32>(page)
+            };
+            code()
+        });
+    // SAFETY: nothing refers to the mapping any more.
+    let _ = unsafe { munmap(page, LEN) };
+    match result? {
+        42 => Ok(()),
+        other => Err(format!("the code returned {other}, not 42")),
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn jit() -> Result<(), String> {
+    Err("the JIT probe knows only x86-64 code".into())
 }
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {

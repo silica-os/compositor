@@ -8,7 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "mm"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client"] }
 
