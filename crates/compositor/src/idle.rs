@@ -38,6 +38,7 @@ impl State {
     /// Input from the user (real or synthetic): the display comes back, the count restarts.
     pub fn user_activity(&mut self) {
         self.last_activity = Instant::now();
+        self.last_input = self.last_activity;
         self.idle_slept = false;
         self.lock_activity();
         if self.display_off {
@@ -46,6 +47,7 @@ impl State {
             #[cfg(feature = "drm")]
             self.drm_display_power(true);
         }
+        self.idle_notify();
     }
 
     /// `power.json` changed.
@@ -77,6 +79,7 @@ impl State {
             self.lock_before_sleep();
             self.system.queue(crate::system::Call::Suspend);
         }
+        self.idle_notify();
     }
 
     /// `idle.state`.

@@ -56,6 +56,7 @@ const EXPECTED: &[&str] = &[
     "zwp_tablet_manager_v2",
     "wp_fractional_scale_manager_v1",
     "wp_security_context_manager_v1",
+    "ext_idle_notifier_v1",
 ];
 
 #[test]

@@ -114,6 +114,7 @@ pub struct State {
     pub announced_focus: Option<String>,
     /// The apps' menus for the global menu bar (`silica-menu-v1`, #25).
     pub app_menus: crate::app_menu::AppMenus,
+    pub idle_notifications: crate::idle_notify::IdleNotifications,
     /// The context menus and pop-up buttons the shell draws (`popup_menu.rs`, #241).
     pub popup_menus: crate::popup_menu::PopupMenus,
     pub seat: Seat<State>,
@@ -154,6 +155,8 @@ pub struct State {
     pub hot_corners: crate::config::HotCornersConfig,
     pub hot_corner_inside: Option<crate::config::Corner>,
     pub last_activity: Instant,
+    /// The last input; `last_activity` also restarts while an idle inhibitor holds.
+    pub last_input: Instant,
     pub display_off: bool,
     /// Something happened that may change the screen (a client request, input, a command):
     /// the next frame tick draws even if the output is idle (`State::wake`, drm.rs).
@@ -369,6 +372,7 @@ impl State {
         let glass_manager_state = crate::glass::GlassManagerState::new(&dh);
         let window_manager_state = crate::window_appearance::WindowManagerState::new(&dh);
         let app_menus = crate::app_menu::AppMenus::new(&dh);
+        let idle_notifications = crate::idle_notify::IdleNotifications::new(&dh);
         let foreign_toplevel_list = crate::shell::toplevel_list(&dh);
         let shell_manager_state = crate::shell::ShellManagerState::new(&dh);
         // Only the shell's locker may lock the session.
@@ -470,6 +474,7 @@ impl State {
             shell_states: std::collections::BTreeMap::new(),
             announced_focus: None,
             app_menus,
+            idle_notifications,
             popup_menus: crate::popup_menu::PopupMenus::default(),
             seat,
             mapped: 0,
@@ -490,6 +495,7 @@ impl State {
             hot_corners: crate::config::HotCornersConfig::default(),
             hot_corner_inside: None,
             last_activity: Instant::now(),
+            last_input: Instant::now(),
             display_off: false,
             redraw: true,
             idle_slept: false,

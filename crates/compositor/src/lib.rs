@@ -26,6 +26,7 @@ mod glass;
 mod glass_equivalence;
 mod handlers;
 mod idle;
+mod idle_notify;
 mod input;
 mod keep;
 mod keymap;
