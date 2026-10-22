@@ -1,0 +1,354 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="silica_shell_v1">
+  <copyright>
+    Copyright © 2026 Silica contributors
+
+    Licensed under MIT OR Apache-2.0.
+  </copyright>
+
+  <description summary="shell commands to the compositor">
+    Reserved to the Silica shell components (Dock, menu bar, Faro): the global is visible
+    only to them. Windows are listed with ext-foreign-toplevel-list-v1; this protocol adds
+    what the shell asks of the compositor.
+  </description>
+
+  <interface name="silica_shell_manager_v1" version="10">
+    <request name="destroy" type="destructor"/>
+
+    <request name="activate">
+      <description summary="brings a window to the front">
+        The window with this identifier (the identifier event of
+        ext_foreign_toplevel_handle_v1) gets the focus and goes above the others, with its
+        child windows above it; the other windows of its app stay where they are (a window
+        picked in the Window menu, the Dock menu or Mission Control). If it is minimized, it
+        comes back where it was; if its app is hidden, the app shows again. An unknown
+        identifier does nothing.
+
+        Before version 10 this brought every window of the app forward, as activate_app
+        does.
+      </description>
+      <arg name="identifier" type="string"/>
+    </request>
+
+    <request name="activate_app" since="10">
+      <description summary="brings an app to the front">
+        Activates the app of the window with this identifier, as a click on its Dock icon,
+        the app switcher or Bring All to Front do: every window of the app on screen comes
+        forward keeping their order, and this window goes on top with the focus. A
+        minimized window comes back by itself; the app's other minimized windows stay
+        minimized. An unknown identifier does nothing.
+      </description>
+      <arg name="identifier" type="string"/>
+    </request>
+
+    <event name="focused">
+      <description summary="the focused window">
+        The identifier (ext_foreign_toplevel_handle_v1.identifier) of the window that has
+        the keyboard focus, or an empty string if no window has it. Sent on binding and on
+        every change.
+      </description>
+      <arg name="identifier" type="string"/>
+    </event>
+
+    <request name="execute">
+      <description summary="runs a catalog command">
+        A parameterless command of the compositor's catalog (the same one used by shortcuts, the
+        control channel and MCP), for example faro.toggle from the bar's magnifier.
+      </description>
+      <arg name="id" type="string"/>
+    </request>
+
+    <event name="command">
+      <description summary="a command for the shell">
+        A catalog command that belongs to a shell component (for example faro.toggle):
+        The compositor forwards it to all of them; each one answers its own.
+      </description>
+      <arg name="id" type="string"/>
+    </event>
+
+    <request name="launch">
+      <description summary="starts an app as a client of the session">
+        The command (POSIX shell syntax, already without the Exec field codes) becomes a
+        child process of the compositor, like app.launch on the control channel.
+      </description>
+      <arg name="command" type="string"/>
+    </request>
+
+    <event name="minimized" since="2">
+      <description summary="a window was minimized or restored">
+        The window with this identifier was minimized (minimized 1) or restored (0). On
+        binding all minimized windows are sent, in the order they were minimized; then on
+        every change. The Dock puts them next to the Trash.
+      </description>
+      <arg name="identifier" type="string"/>
+      <arg name="minimized" type="uint"/>
+    </event>
+
+    <request name="thumbnail" since="2">
+      <description summary="the thumbnail of a minimized window">
+        the compositor writes into the file the window thumbnail (8-bit premultiplied RGBA, rows
+        from the top, no padding between rows), taken when it was minimized, at most 256
+        pixels per side; then it sends the thumbnail event. The file must be writable and at
+        least 256 × 256 × 4 bytes large.
+      </description>
+      <arg name="identifier" type="string"/>
+      <arg name="fd" type="fd"/>
+    </request>
+
+    <event name="thumbnail" since="2">
+      <description summary="the thumbnail is in the file">
+        Width and height of the thumbnail written into the file; 0 and 0 if the window is
+        not minimized or has no thumbnail.
+      </description>
+      <arg name="identifier" type="string"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+
+    <event name="window_menu" since="3">
+      <description summary="the arrangement popover of a window">
+        Long press on the full-screen button of the window with this identifier: the shell
+        opens the arrangement popover (move and resize, fill and arrange, full screen) with
+        the tip towards the point x, y (logical screen coordinates, below the button). The
+        entries run the window.tile_* commands on the focused window.
+      </description>
+      <arg name="identifier" type="string"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </event>
+
+    <event name="window_menu_appearance" since="8">
+      <description summary="the appearance of the window of the next window_menu">
+        Sent right before window_menu, for the same window: appearance is 0 when the window
+        follows the system, 1 for light and 2 for dark (the window asked for it with
+        silica_window_v1.set_appearance). The shell draws the popover in that appearance.
+      </description>
+      <arg name="identifier" type="string"/>
+      <arg name="appearance" type="uint"/>
+    </event>
+
+    <request name="broadcast" since="4">
+      <description summary="a state for the other shell components">
+        A component announces a state to the others (for example the open Control Center,
+        which the bar shows with the capsule on its icon): The compositor sends it back to every
+        shell component with the broadcast event, sender included, and remembers it for
+        whoever binds later.
+      </description>
+      <arg name="topic" type="string"/>
+      <arg name="value" type="string"/>
+    </request>
+
+    <event name="broadcast" since="4">
+      <description summary="the state announced by a component">
+        On binding the last value of every topic, then on every announcement.
+      </description>
+      <arg name="topic" type="string"/>
+      <arg name="value" type="string"/>
+    </event>
+
+    <request name="execute_with" since="5">
+      <description summary="runs a catalog command with parameters">
+        Like execute, with the parameters in JSON (an object): for example
+        screenshot.region with the rectangle chosen in the crosshair.
+      </description>
+      <arg name="id" type="string"/>
+      <arg name="params" type="string"/>
+    </request>
+    <enum name="outside" since="6">
+      <description summary="what an input outside an open transient does">
+        The version 6 rule, the same for every surface outside the transient: the pointer's
+        hover always reaches the surfaces below. Since version 7 set_owned_transient
+        replaces it with a rule for the owner app and one for the other surfaces.
+      </description>
+      <entry name="consume" value="0" summary="it closes the transient and does nothing else"/>
+      <entry name="pass_through" value="1" summary="it closes the transient and also reaches what is below"/>
+    </enum>
+
+    <request name="set_transient" since="6">
+      <description summary="a menu or panel of this surface is open">
+        While a transient is open the surface keeps an input region as small as the menu or
+        panel itself: the other windows keep receiving the pointer (hover, cursor shapes).
+        A button press outside the transient makes the compositor send dismissed; then, per press, the
+        press is consumed or delivered to what is under the pointer. Scrolling outside is
+        delivered or dropped per scroll, without dismissing. A press on the surface itself
+        (or its subsurfaces and popups) counts as inside, as does one inside region (surface
+        coordinates; null: only the surface itself). Setting it again replaces the previous
+        transient of the same surface. Keyboard routing stays with the layer surface's
+        keyboard interactivity, which the shell sets while the transient is open.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="region" type="object" interface="wl_region" allow-null="true"/>
+      <arg name="press" type="uint" enum="outside"/>
+      <arg name="scroll" type="uint" enum="outside"/>
+    </request>
+
+    <request name="clear_transient" since="6">
+      <description summary="the transient of this surface is closed">
+        The shell closed it itself (Esc, a choice, a toggle): no dismissed event follows.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <enum name="rule" since="7">
+      <description summary="what the surfaces outside an open transient receive">
+        Whatever the rule, the wheel never ends a transient, and while one is open the compositor
+        shows the arrow over every surface outside it (the text cursor is not shown: the
+        window below does not have the keyboard).
+      </description>
+      <entry name="modal" value="0"
+             summary="no hover and no wheel; a press closes the transient and stops there"/>
+      <entry name="pass" value="1"
+             summary="hover and wheel reach the surface; a press closes the transient and reaches it too"/>
+      <entry name="activate" value="2"
+             summary="hover and wheel reach the surface; a primary press closes the transient and only activates the window under it, other buttons close it and reach the surface"/>
+    </enum>
+
+    <request name="set_owned_transient" since="7">
+      <description summary="a menu or panel of this surface is open, with an owner app">
+        Like set_transient (the same surface, region, replacement, clear_transient and
+        dismissed), with the outside split in two targets: the surfaces of the owner app
+        follow owner_rule, every other surface follows other_rule. The owner is an app id
+        (its windows, their popups and subsurfaces, and its desktop surface
+        "desktop-icons:app-id"), "desktop-icons" for whichever app owns the desktop surface,
+        "desktop-icons:app-id" for that app, or an empty string for the system (no owner app:
+        every surface follows other_rule).
+
+        With a modal rule the pointer leaves the surfaces of that target while the
+        transient is open (no hover, no tooltips) and wheel events there are dropped; a
+        press there ends the transient and nothing else. An activate press ends the
+        transient and gives the keyboard focus to the window under the pointer, raising it,
+        without delivering the press or its drag: the window becomes active again and its
+        content does not see the click.
+
+        When a press is outside several transients, the strictest outcome wins: modal,
+        then activate, then pass.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="region" type="object" interface="wl_region" allow-null="true"/>
+      <arg name="owner" type="string"/>
+      <arg name="owner_rule" type="uint" enum="rule"/>
+      <arg name="other_rule" type="uint" enum="rule"/>
+    </request>
+
+    <event name="dismissed" since="6">
+      <description summary="a press outside closed the transient">
+        The transient of this surface ended because of a press outside it; the shell closes
+        the menu or panel. Sent once; the transient is already cleared.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </event>
+
+    <event name="app_menu" since="8">
+      <description summary="the menus of the frontmost app">
+        The menus the frontmost app published with silica-menu-v1, checked and rewritten by
+        the compositor in the same JSON format, in a sealed file of size bytes from offset 0. app_id
+        is the frontmost app (empty with none); serial names the app's menu object for
+        activate_menu_item, 0 (with size 0) when the app published no menus. Sent on binding
+        and every time the frontmost app or its menus change; while a menu or panel of the
+        shell has the keyboard the frontmost app does not change.
+      </description>
+      <arg name="app_id" type="string"/>
+      <arg name="serial" type="uint"/>
+      <arg name="fd" type="fd"/>
+      <arg name="size" type="uint"/>
+    </event>
+
+    <request name="activate_menu_item" since="8">
+      <description summary="an item of the app's menus was chosen">
+        the compositor sends activated with the id to the menu object with this serial, if it still
+        exists; an old serial does nothing.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="id" type="uint"/>
+    </request>
+
+    <enum name="popup_row_kind" since="9">
+      <entry name="item" value="0"/>
+      <entry name="separator" value="1"/>
+      <entry name="section" value="2"/>
+      <entry name="submenu_begin" value="3"/>
+      <entry name="submenu_end" value="4"/>
+    </enum>
+
+    <event name="popup_menu" since="9">
+      <description summary="an app asked for a context menu or a pop-up button's menu">
+        The shell draws it (silica-os/silica-desktop#241). serial names the menu in the requests below.
+        app_id is the owner app (its id for the transient's owner). The anchor is in
+        output coordinates, logical pixels (a 0 × 0 rectangle for a context menu at the
+        pointer, the control for a pop-up button); kind and selected are those of the app's
+        request (0 context, 1 pop-up; selected 0 for none). The rows follow in
+        popup_menu_row events and popup_menu_end closes the list; the shell opens the menu
+        at the end. appearance is the app's window appearance as for window_menu_appearance.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="app_id" type="string"/>
+      <arg name="kind" type="uint"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="selected" type="uint"/>
+      <arg name="appearance" type="uint"/>
+    </event>
+
+    <event name="popup_menu_row" since="9">
+      <description summary="a row of the menu that is being sent">
+        kind is a popup_row_kind. id, flags, icon, key and modifiers are those of the app's
+        add_item (flags and icon also of begin_submenu); label also of add_section and
+        begin_submenu; unused fields are empty or 0.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="kind" type="uint"/>
+      <arg name="id" type="uint"/>
+      <arg name="label" type="string"/>
+      <arg name="flags" type="uint"/>
+      <arg name="icon" type="string"/>
+      <arg name="key" type="string"/>
+      <arg name="modifiers" type="uint"/>
+    </event>
+
+    <event name="popup_menu_end" since="9">
+      <description summary="the rows of the menu are complete">
+        The shell may lay the menu out and show it.
+      </description>
+      <arg name="serial" type="uint"/>
+    </event>
+
+    <event name="popup_menu_closed" since="9">
+      <description summary="the compositor ended the menu">
+        A press outside, a change of context, the app or its surface going away: the shell
+        fades the menu out. Sent once per menu, also after popup_menu_close and
+        popup_menu_choose (then the menu is already closing on the shell's side).
+      </description>
+      <arg name="serial" type="uint"/>
+    </event>
+
+    <request name="popup_menu_transient" since="9">
+      <description summary="where the open popup menu is">
+        The shell's surface that draws the menu and the rectangles of the menu and its open
+        submenu (surface coordinates, as set_owned_transient). The compositor already keeps the menu
+        as a transient owned by the app (modal for the app, pass for everything else) from the
+        moment the app showed it; this tells where it is, so that a press on it does not end
+        it. Sent again whenever the rectangles change.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="region" type="object" interface="wl_region" allow-null="true"/>
+    </request>
+
+    <request name="popup_menu_choose" since="9">
+      <description summary="the user chose an item of the popup menu">
+        the compositor sends selected(id) to the app and ends the menu. An old serial does nothing.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="id" type="uint"/>
+    </request>
+
+    <request name="popup_menu_close" since="9">
+      <description summary="the user closed the popup menu">
+        Esc, or a click on nothing inside the shell's surface: the app is told dismissed.
+      </description>
+      <arg name="serial" type="uint"/>
+    </request>
+  </interface>
+</protocol>

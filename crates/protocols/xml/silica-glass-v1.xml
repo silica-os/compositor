@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="silica_glass_v1">
+  <copyright>
+    Copyright © 2026 Silica contributors
+
+    Licensed under MIT OR Apache-2.0.
+  </copyright>
+
+  <description summary="glass regions computed by the compositor">
+    A client declares regions of one of its surfaces to be rendered as glass: the
+    compositor samples what is behind the surface and shows it blurred, with the
+    color and refraction of the chosen material. The client draws its own content
+    (text, icons) on top, with transparent pixels where the glass must show.
+  </description>
+
+  <interface name="silica_glass_manager_v1" version="9">
+    <description summary="creates the glass object of a surface"/>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroys the manager; glass objects stay valid"/>
+    </request>
+
+    <enum name="error">
+      <entry name="already_has_glass" value="0"
+             summary="the surface already has a silica_glass_v1 object"/>
+    </enum>
+
+    <request name="get_glass">
+      <description summary="glass object for a surface">
+        A surface has at most one glass object: a second get_glass on the same
+        surface is the already_has_glass error.
+      </description>
+      <arg name="id" type="new_id" interface="silica_glass_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+  </interface>
+
+  <interface name="silica_glass_v1" version="9">
+    <description summary="glass regions of a surface">
+      The state is double-buffered: clear and add_region change the pending state, which
+      becomes current on the next wl_surface.commit. Coordinates are in the surface
+      coordinate system, in logical pixels. Since version 8 a region can be rotated about its
+      centre (set_rotation): its x, y, width and height are then the rectangle before the
+      rotation.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="removes the glass from the surface on the next commit"/>
+    </request>
+
+    <enum name="material">
+      <description summary="measured materials">
+        The measured glass families: clear (small blur, almost transparent), thick (wide
+        blur, almost white in the light appearance) and regular (the lens glass of
+        controls: strong lens at the edge). Since version 2: notification (very wide blur,
+        almost opaque, like banners and the Notification Center).
+      </description>
+      <entry name="clear" value="0" summary="clear glass, like the Dock"/>
+      <entry name="thick" value="1" summary="thick glass, like menus and search"/>
+      <entry name="regular" value="2" summary="glass of controls, with the edge lens"/>
+      <entry name="notification" value="3" since="2" summary="glass of notifications"/>
+    </enum>
+
+    <enum name="side" since="6">
+      <description summary="the side a sideways tip points to"/>
+      <entry name="left" value="0" summary="apex on the left side, base on the right side"/>
+      <entry name="right" value="1" summary="apex on the right side, base on the left side"/>
+    </enum>
+
+    <enum name="profile" since="7">
+      <description summary="the kind of surface a glass belongs to">
+        The compositor picks the blur, the refraction (strength and how far it reaches from the
+        edge), the edge light, the tint and saturation and the shadow of each kind, and its
+        tone (what the background becomes behind it). default: the kind follows from the
+        material (clear: dock, thick: menu, regular: module, notification: banner).
+      </description>
+      <entry name="default" value="0" summary="from the material"/>
+      <entry name="menu" value="1" summary="menus and context menus"/>
+      <entry name="panel" value="2" summary="large panels: Notification Center, search, launcher"/>
+      <entry name="module" value="3" summary="Control Center modules and HUDs"/>
+      <entry name="control" value="4" summary="small controls on glass: toolbar buttons, pills"/>
+      <entry name="dock" value="5" summary="the Dock and the app switcher"/>
+      <entry name="tooltip" value="6" summary="tooltips and labels"/>
+      <entry name="sheet" value="7" summary="sheets and alerts"/>
+      <entry name="banner" value="8" summary="notification banners"/>
+      <entry name="popover" value="9" summary="popovers (a bubble with a tip)"/>
+    </enum>
+
+    <enum name="shadow" since="7">
+      <description summary="who draws the shadow of a glass"/>
+      <entry name="client" value="0" summary="the client draws it (or there is none)"/>
+      <entry name="compositor" value="1" summary="the compositor draws the profile's shadow"/>
+    </enum>
+
+    <enum name="error">
+      <entry name="invalid_region" value="0"
+             summary="negative or zero size, negative radius, unknown material or opacity outside 0–1"/>
+      <entry name="too_many_regions" value="1" summary="more than 64 pending regions"/>
+      <entry name="invalid_profile" value="2" since="7" summary="unknown profile or shadow"/>
+    </enum>
+
+    <request name="clear">
+      <description summary="removes all pending regions"/>
+    </request>
+
+    <request name="add_region">
+      <description summary="adds a region to the pending state">
+        A rectangle with circular-arc corners of the given radius (0 = square corners).
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="radius" type="fixed"/>
+      <arg name="material" type="uint" enum="material"/>
+    </request>
+
+    <request name="add_translucent_region" since="3">
+      <description summary="adds a region with an opacity">
+        Like add_region, with the glass composed at the given opacity (0–1): a panel that
+        fades in or out carries its glass with it.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="radius" type="fixed"/>
+      <arg name="material" type="uint" enum="material"/>
+      <arg name="opacity" type="fixed"/>
+    </request>
+
+    <request name="separate" since="4">
+      <description summary="the following regions form a group of their own">
+        Regions added after this request do not merge with those added before, even when
+        close or overlapping, and are drawn on top of them: a submenu over its menu.
+        clear goes back to the first group.
+      </description>
+    </request>
+
+    <request name="add_continuous_region" since="9">
+      <description summary="adds a region with continuous corners">
+        Like add_translucent_region, with the corners drawn as a continuous curve instead of a
+        circular arc (the shape of an app icon's body). `radius` is the radius of the equivalent
+        circular corner, `smoothing` (0–1) how far the curve spreads along the edges: the corner
+        starts radius × (1 + smoothing) from the corner point along each edge. With a smoothing
+        of 0 it is a circular corner. The compositor draws a superellipse fitted to the Sketch
+        body path (radius 214 and smoothing 0.6 on 824) within 0.5 px at 60 and 128 pt. Applies
+        with set_rotation like the other regions.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="radius" type="fixed"/>
+      <arg name="smoothing" type="fixed"/>
+      <arg name="material" type="uint" enum="material"/>
+      <arg name="opacity" type="fixed"/>
+    </request>
+
+    <request name="add_tip" since="4">
+      <description summary="adds a downward tip">
+        A tip in the given rectangle, the base on the top side (the body's edge) and the
+        round apex at the middle of the bottom side: concave fillets leave the body edge at
+        the rectangle's left and right sides, turn into straight flanks and meet in the apex.
+        The compositor draws the measured outline closest to the rectangle's size (a Dock
+        menu's tip is 31 × 10, a popover's 32 × 11, a sideways popover's 39 × 12). It merges
+        with the regions of the same group and material: the glass edge runs without a break
+        from the body to the tip.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="material" type="uint" enum="material"/>
+      <arg name="opacity" type="fixed"/>
+    </request>
+
+    <request name="add_upward_tip" since="5">
+      <description summary="adds an upward tip">
+        Like add_tip, flipped: the base on the bottom side of the rectangle and the apex at
+        the middle of the top side (a popover below the button that opens it).
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="material" type="uint" enum="material"/>
+      <arg name="opacity" type="fixed"/>
+    </request>
+
+    <request name="add_side_tip" since="6">
+      <description summary="adds a tip pointing left or right">
+        Like add_tip, turned sideways: pointing left, the base on the right side of the
+        rectangle and the apex at the middle of the left side; pointing right, the other way
+        round (a popover beside the control that opens it). The base is the rectangle's
+        height, the depth its width.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="side" type="uint" enum="side"/>
+      <arg name="material" type="uint" enum="material"/>
+      <arg name="opacity" type="fixed"/>
+    </request>
+
+    <request name="set_profile" since="7">
+      <description summary="the profile of the following regions">
+        The regions added after this request belong to this kind of surface, until the next
+        set_profile or clear (which goes back to default and client). With compositor, the
+        compositor draws the profile's shadow under the glass, outside its shape; the client
+        then draws none. Pending state like the regions.
+      </description>
+      <arg name="profile" type="uint" enum="profile"/>
+      <arg name="shadow" type="uint" enum="shadow"/>
+    </request>
+
+    <request name="set_rotation" since="8">
+      <description summary="the rotation of the following regions">
+        The regions and tips added after this request are rotated by this angle about the
+        centre of their own rectangle, in degrees, clockwise on screen (the y axis points
+        down), until the next set_rotation or clear (which goes back to 0). The whole shape
+        turns with it: the corners, the edge light (on the region's own top edge), the outline,
+        the lens and the compositor's shadow. A label tilted with its object declares its
+        upright rectangle and the angle, not the bounding box of the tilted one. Pending state
+        like the regions.
+      </description>
+      <arg name="degrees" type="fixed"/>
+    </request>
+  </interface>
+</protocol>

@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="silica_window_v1">
+  <copyright>
+    Copyright © 2026 Silica contributors
+
+    Licensed under MIT OR Apache-2.0.
+  </copyright>
+
+  <description summary="appearance of an app window">
+    An app tells the compositor how to present its window. With full-size content the compositor does not
+    add its title bar above the content: the app draws its own toolbar (unified with the
+    title bar) and the sidebar up to the top, and the compositor only draws the window buttons over
+    the content, at the top left, vertically centered in the toolbar height.
+  </description>
+
+  <interface name="silica_window_manager_v1" version="4">
+    <description summary="creates the window object of a surface"/>
+
+    <request name="destroy" type="destructor">
+      <description summary="the manager is no longer needed"/>
+    </request>
+
+    <enum name="error">
+      <entry name="already_has_window" value="0" summary="the surface already has a window object"/>
+    </enum>
+
+    <request name="get_window">
+      <description summary="the window object of an xdg_toplevel's surface">
+        The surface is the one with the window's xdg_toplevel role.
+      </description>
+      <arg name="id" type="new_id" interface="silica_window_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+  </interface>
+
+  <interface name="silica_window_v1" version="4">
+    <description summary="appearance of a window">
+      The state is double-buffered: it becomes current on the next wl_surface.commit.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="back to the normal appearance on the next commit"/>
+    </request>
+
+    <request name="set_full_size_content">
+      <description summary="full-size content">
+        toolbar_height is the height, in logical pixels, of the toolbar the app draws at the
+        top: the window buttons are vertically centered in that band. 0 goes back to the compositor's
+        title bar. Values above 200 are clamped to 200.
+      </description>
+      <arg name="toolbar_height" type="uint"/>
+    </request>
+
+    <enum name="appearance" since="3">
+      <description summary="light or dark presentation of a window"/>
+      <entry name="system" value="0" summary="follow the system appearance"/>
+      <entry name="light" value="1" summary="always light"/>
+      <entry name="dark" value="2" summary="always dark"/>
+    </enum>
+
+    <request name="set_appearance" since="3">
+      <description summary="override the appearance of this window">
+        Everything the compositor draws for the window follows the chosen appearance instead of the
+        system's: the window buttons, the plain title bar and its title, the shadow and inner
+        border, the glass regions declared by the window and the arrangement popover opened
+        from its buttons. An app that is always dark (as on macOS, where NSWindow.appearance
+        overrides the system's) asks for dark. system, the default, follows the system again.
+        An unknown value is a protocol error (invalid_appearance). Double-buffered, applied on
+        the next wl_surface.commit.
+      </description>
+      <arg name="appearance" type="uint" enum="appearance"/>
+    </request>
+
+    <enum name="error">
+      <entry name="invalid_appearance" value="0" summary="the appearance value is unknown"/>
+    </enum>
+
+    <request name="set_hidden" since="2">
+      <description summary="hide or show the window without closing it">
+        A non-zero hidden takes the window off the screen, out of the window lists and out of
+        the focus, as if it were closed, but the app keeps its surface and its state: closing
+        an app's last window does not end the app (silica-os/silica-desktop#142). Zero brings the window
+        back where it was, focused; for a window that is already on screen it raises and focuses
+        it (the app was opened again while the window sat behind others). Applied at once, not
+        on the next commit.
+      </description>
+      <arg name="hidden" type="uint"/>
+    </request>
+
+    <request name="set_size_increment" since="4">
+      <description summary="resize in whole steps">
+        Interactive resizing snaps the content size (the surface's window geometry, in logical
+        pixels) to base + n * step on each axis, with the nearest n that respects the minimum
+        and maximum size. A terminal asks for its cell size (base: the padding). A step of 0
+        leaves that axis free; all steps 0 goes back to free resizing. Double-buffered,
+        applied on the next wl_surface.commit.
+      </description>
+      <arg name="base_width" type="uint"/>
+      <arg name="base_height" type="uint"/>
+      <arg name="step_width" type="uint"/>
+      <arg name="step_height" type="uint"/>
+    </request>
+  </interface>
+</protocol>

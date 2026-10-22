@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300" font-family="Inter, sans-serif" font-size="12">
+  <title>Control Center module lens: source shift by distance from the edge</title>
+  <rect width="640" height="300" fill="#ffffff"/>
+  <!-- plot area: x = 60 + 16·d (d in pt, 0–32), y = 150 − 4·shift (shift in pt) -->
+  <rect x="60" y="30" width="96" height="220" fill="#f6d8d0"/>
+  <rect x="156" y="30" width="288" height="220" fill="#dbe8f7"/>
+  <text x="108" y="48" text-anchor="middle" fill="#7a3a2a">outside</text>
+  <text x="108" y="62" text-anchor="middle" fill="#7a3a2a">wallpaper</text>
+  <text x="300" y="48" text-anchor="middle" fill="#2a4a7a">magnified, shifted inwards</text>
+  <text x="530" y="48" text-anchor="middle" fill="#555">no shift</text>
+  <line x1="60" y1="150" x2="590" y2="150" stroke="#888"/>
+  <line x1="60" y1="30" x2="60" y2="250" stroke="#888"/>
+  <g fill="#555" text-anchor="middle">
+    <text x="60" y="268">0</text><text x="156" y="268">6</text><text x="252" y="268">12</text>
+    <text x="348" y="268">18</text><text x="444" y="268">24</text><text x="540" y="268">30</text>
+    <text x="325" y="290">distance from the module edge (pt)</text>
+  </g>
+  <g fill="#555" text-anchor="end">
+    <text x="54" y="74">+19</text><text x="54" y="154">0</text><text x="54" y="234">−20</text>
+  </g>
+  <text x="18" y="150" fill="#555" transform="rotate(-90 18 150)" text-anchor="middle">source shift (pt, + = inwards)</text>
+  <!-- left edge measurements: −24 at ~1 pt, −4 at ~6, +4.2 at 10, +1.2 at 24 -->
+  <polyline fill="none" stroke="#1d5fb4" stroke-width="2"
+    points="76,246 108,190 156,134 220,133 300,142 444,145 540,150 590,150"/>
+  <g fill="#1d5fb4">
+    <circle cx="76" cy="246" r="3"/><circle cx="156" cy="134" r="3"/>
+    <circle cx="220" cy="133" r="3"/><circle cx="444" cy="145" r="3"/>
+  </g>
+  <text x="230" y="124" fill="#1d5fb4">+4.2 at 10 pt</text>
+  <text x="84" y="240" fill="#1d5fb4">−24 near the edge</text>
+</svg>

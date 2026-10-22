@@ -1,0 +1,201 @@
+//! XML and bindings of the silica-* protocols.
+//!
+//! - `silica-glass-v1` (`xml/silica-glass-v1.xml`): glass regions of a surface.
+//! - `silica-shell-v1` (`xml/silica-shell-v1.xml`): shell commands to the compositor.
+//! - `silica-window-v1` (`xml/silica-window-v1.xml`): appearance of an app window
+//!   (full-size content with the compositor's buttons on top).
+//! - `silica-menu-v1` (`xml/silica-menu-v1.xml`): an app's menus in the global menu bar.
+//!
+//! The server side (`server`) is for the compositor, the client side (`client`) for the embedder.
+
+/// `silica-glass-v1`.
+pub mod glass {
+    #[cfg(feature = "server")]
+    #[allow(
+        missing_docs,
+        clippy::all,
+        clippy::pedantic,
+        unused_imports,
+        non_upper_case_globals
+    )]
+    pub mod server {
+        use wayland_server;
+        use wayland_server::protocol::*;
+
+        pub mod __interfaces {
+            use wayland_server::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-glass-v1.xml");
+        }
+        use self::__interfaces::*;
+
+        wayland_scanner::generate_server_code!("xml/silica-glass-v1.xml");
+    }
+
+    #[cfg(feature = "client")]
+    #[allow(
+        missing_docs,
+        clippy::all,
+        clippy::pedantic,
+        unused_imports,
+        non_upper_case_globals
+    )]
+    pub mod client {
+        use wayland_client;
+        use wayland_client::protocol::*;
+
+        pub mod __interfaces {
+            use wayland_client::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-glass-v1.xml");
+        }
+        use self::__interfaces::*;
+
+        wayland_scanner::generate_client_code!("xml/silica-glass-v1.xml");
+    }
+
+    /// Pending regions beyond which the request is a client error.
+    pub const MAX_REGIONS: usize = 64;
+}
+
+/// `silica-shell-v1`.
+pub mod shell {
+    #[cfg(feature = "server")]
+    #[allow(
+        missing_docs,
+        clippy::all,
+        clippy::pedantic,
+        unused_imports,
+        non_upper_case_globals
+    )]
+    pub mod server {
+        use wayland_server;
+        use wayland_server::protocol::*;
+
+        pub mod __interfaces {
+            use wayland_server::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-shell-v1.xml");
+        }
+        use self::__interfaces::*;
+
+        wayland_scanner::generate_server_code!("xml/silica-shell-v1.xml");
+    }
+
+    #[cfg(feature = "client")]
+    #[allow(
+        missing_docs,
+        clippy::all,
+        clippy::pedantic,
+        unused_imports,
+        non_upper_case_globals
+    )]
+    pub mod client {
+        use wayland_client;
+        use wayland_client::protocol::*;
+
+        pub mod __interfaces {
+            use wayland_client::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-shell-v1.xml");
+        }
+        use self::__interfaces::*;
+
+        wayland_scanner::generate_client_code!("xml/silica-shell-v1.xml");
+    }
+
+    /// Environment variable that the compositor sets on the shell components it launches: only their
+    /// processes see `silica_shell_manager_v1` and the window list.
+    pub const SHELL_ENV: &str = "SILICA_SHELL";
+}
+
+/// `silica-window-v1`.
+pub mod window {
+    #[cfg(feature = "server")]
+    #[allow(
+        missing_docs,
+        clippy::all,
+        clippy::pedantic,
+        unused_imports,
+        non_upper_case_globals
+    )]
+    pub mod server {
+        use wayland_server;
+        use wayland_server::protocol::*;
+
+        pub mod __interfaces {
+            use wayland_server::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-window-v1.xml");
+        }
+        use self::__interfaces::*;
+
+        wayland_scanner::generate_server_code!("xml/silica-window-v1.xml");
+    }
+
+    #[cfg(feature = "client")]
+    #[allow(
+        missing_docs,
+        clippy::all,
+        clippy::pedantic,
+        unused_imports,
+        non_upper_case_globals
+    )]
+    pub mod client {
+        use wayland_client;
+        use wayland_client::protocol::*;
+
+        pub mod __interfaces {
+            use wayland_client::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-window-v1.xml");
+        }
+        use self::__interfaces::*;
+
+        wayland_scanner::generate_client_code!("xml/silica-window-v1.xml");
+    }
+}
+
+/// `silica-menu-v1`.
+pub mod menu {
+    #[cfg(feature = "server")]
+    #[allow(
+        missing_docs,
+        clippy::all,
+        clippy::pedantic,
+        unused_imports,
+        non_upper_case_globals
+    )]
+    pub mod server {
+        use wayland_server;
+        use wayland_server::protocol::*;
+
+        pub mod __interfaces {
+            use wayland_server::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-menu-v1.xml");
+        }
+        use self::__interfaces::*;
+
+        wayland_scanner::generate_server_code!("xml/silica-menu-v1.xml");
+    }
+
+    #[cfg(feature = "client")]
+    #[allow(
+        missing_docs,
+        clippy::all,
+        clippy::pedantic,
+        unused_imports,
+        non_upper_case_globals
+    )]
+    pub mod client {
+        use wayland_client;
+        use wayland_client::protocol::*;
+
+        pub mod __interfaces {
+            use wayland_client::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-menu-v1.xml");
+        }
+        use self::__interfaces::*;
+
+        wayland_scanner::generate_client_code!("xml/silica-menu-v1.xml");
+    }
+
+    /// The largest model in bytes (`silica_menu_v1.limits.max_model_size`).
+    pub const MAX_MODEL_SIZE: usize = 262_144;
+
+    pub mod model;
+}

@@ -1,0 +1,23 @@
+[package]
+name = "silica-cli"
+description = "Command line for Silica commands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "silica-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "silica-action"
+path = "src/action.rs"
+
+[dependencies]
+serde_json = "1"
+silica-control = { path = "../control" }
+
+[lints]
+workspace = true

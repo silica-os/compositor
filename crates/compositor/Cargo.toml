@@ -1,0 +1,52 @@
+[package]
+name = "compositor"
+description = "Silica's Wayland compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "compositor"
+
+[[bin]]
+name = "silica-compositor"
+path = "src/main.rs"
+
+[features]
+default = ["drm"]
+# The real-session backend (`--backend drm`): udev, DRM/KMS, GBM, libinput and libseat.
+# Building it needs the libudev, libinput, libseat and libgbm development packages.
+drm = [
+    "smithay/backend_drm",
+    "smithay/backend_gbm",
+    "smithay/backend_libinput",
+    "smithay/backend_session_libseat",
+    "smithay/backend_udev",
+]
+
+[dependencies]
+base64 = "0.22"
+compositor-render = { path = "../compositor-render" }
+png = "0.17"
+rustix = { version = "1", features = ["fs", "net", "process"] }
+serde = "1"
+serde_json = "1"
+xcursor = "0.3"
+zbus = "5.19"
+silica-control = { path = "../control" }
+silica-protocols = { path = "../protocols", features = ["server"] }
+smithay = { version = "0.7", default-features = false, features = ["renderer_gl", "renderer_pixman", "wayland_frontend", "desktop"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+silica-protocols = { path = "../protocols", features = ["client"] }
+tempfile = "3"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "silica-control"
+description = "Silica's JSON control channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
