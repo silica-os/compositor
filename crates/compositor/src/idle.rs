@@ -58,6 +58,10 @@ impl State {
 
     /// Every `CHECK`: turns the display off or asks for sleep when their time has come.
     pub fn idle_check(&mut self) {
+        // A video or a presentation holds an idle inhibitor: the count starts again.
+        if self.idle_inhibited() {
+            self.last_activity = Instant::now();
+        }
         let idle = self.last_activity.elapsed();
         let actions = due(&self.power_config, idle);
         if actions.display_off && !self.display_off {

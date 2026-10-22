@@ -57,6 +57,10 @@ impl CompositorHandler for State {
         }
     }
 
+    fn new_surface(&mut self, surface: &WlSurface) {
+        crate::protocols::add_buffer_blockers(surface);
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         // It must be read before the buffer handler, which consumes the buffer just assigned.
         let new_buffer = with_states(surface, |states| {

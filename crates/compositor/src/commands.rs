@@ -844,7 +844,8 @@ impl State {
         process
             .arg("-c")
             .arg(command)
-            .env("WAYLAND_DISPLAY", &self.socket_name);
+            .env("WAYLAND_DISPLAY", &self.socket_name)
+            .env("XDG_ACTIVATION_TOKEN", self.launch_activation_token());
         if let Some(address) = &self.session_bus {
             process.env("DBUS_SESSION_BUS_ADDRESS", address);
         }

@@ -4,9 +4,11 @@ use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
     GestureEndEvent, GesturePinchUpdateEvent, GestureSwipeUpdateEvent, InputBackend, InputEvent,
     KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+    TouchEvent,
 };
 use smithay::input::keyboard::{FilterResult, Keycode, xkb};
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{self as ptr, AxisFrame, ButtonEvent, MotionEvent, PointerHandle};
+use smithay::input::touch;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 use smithay::wayland::shell::wlr_layer::Layer;
 use tracing::warn;
@@ -391,7 +393,9 @@ impl State {
         let locked = self.locked;
         let capturing = self.shortcuts_capture
             && self.front_app_id().as_deref() == Some(crate::config::SHORTCUT_CAPTURE_APP);
-        let shortcuts = if capturing || locked {
+        // An app that inhibits shortcuts (a remote desktop, a VM) gets them while focused.
+        let inhibited = self.shortcuts_inhibited();
+        let shortcuts = if capturing || locked || inhibited {
             Vec::new()
         } else {
             self.shortcuts.clone()
@@ -494,6 +498,17 @@ impl State {
             .is_some_and(|(layer, _)| layer.namespace() != "menubar")
     }
 
+    /// A gesture event for the app under the pointer, framed.
+    fn client_gesture(&mut self, send: impl FnOnce(&mut Self, &PointerHandle<Self>)) {
+        if self.locked {
+            return;
+        }
+        if let Some(pointer) = self.seat.get_pointer() {
+            send(self, &pointer);
+            pointer.frame(self);
+        }
+    }
+
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         if !matches!(
             event,
@@ -502,6 +517,12 @@ impl State {
             self.user_activity();
         }
         match event {
+            InputEvent::DeviceAdded { device } => self.tablet_added(&device),
+            InputEvent::DeviceRemoved { device } => self.tablet_removed(&device),
+            InputEvent::TabletToolAxis { event } => self.tablet_axis(event),
+            InputEvent::TabletToolProximity { event } => self.tablet_proximity(event),
+            InputEvent::TabletToolTip { event } => self.tablet_tip(event),
+            InputEvent::TabletToolButton { event } => self.tablet_button(event),
             InputEvent::Keyboard { event } => {
                 self.handle_key(event.key_code(), event.state(), Event::time_msec(&event));
             }
@@ -521,7 +542,20 @@ impl State {
                 ) else {
                     return;
                 };
-                let location = clamp_to(pointer.current_location() + event.delta(), geometry);
+                let from = pointer.current_location();
+                let location = clamp_to(from + event.delta(), geometry);
+                let location = self.constrained_motion(from, location);
+                // Games and 3D views read the unclamped movement (relative-pointer).
+                let focus = self.surface_under(from);
+                pointer.relative_motion(
+                    self,
+                    focus,
+                    &ptr::RelativeMotionEvent {
+                        delta: event.delta(),
+                        delta_unaccel: event.delta_unaccel(),
+                        utime: event.time(),
+                    },
+                );
                 self.pointer_move_to(location, event.time_msec());
             }
             InputEvent::PointerButton { event } => {
@@ -555,23 +589,201 @@ impl State {
                 self.pointer_axis(frame);
             }
             InputEvent::GestureSwipeBegin { event } => {
-                self.gesture_begin(crate::gestures::GestureKind::Swipe, event.fingers());
+                // Three or more fingers belong to the system (spaces, Panorama); fewer go to
+                // the app under the pointer (pointer-gestures).
+                let fingers = event.fingers();
+                self.protocols.client_gesture = fingers < 3;
+                if self.protocols.client_gesture {
+                    self.client_gesture(|state, pointer| {
+                        pointer.gesture_swipe_begin(
+                            state,
+                            &ptr::GestureSwipeBeginEvent {
+                                serial: SERIAL_COUNTER.next_serial(),
+                                time: event.time_msec(),
+                                fingers,
+                            },
+                        );
+                    });
+                } else {
+                    self.gesture_begin(crate::gestures::GestureKind::Swipe, fingers);
+                }
             }
             InputEvent::GestureSwipeUpdate { event } => {
                 let delta = event.delta();
-                self.gesture_update(delta.x, delta.y, None);
+                if self.protocols.client_gesture {
+                    self.client_gesture(|state, pointer| {
+                        pointer.gesture_swipe_update(
+                            state,
+                            &ptr::GestureSwipeUpdateEvent {
+                                time: event.time_msec(),
+                                delta,
+                            },
+                        );
+                    });
+                } else {
+                    self.gesture_update(delta.x, delta.y, None);
+                }
             }
             InputEvent::GestureSwipeEnd { event } => {
-                self.gesture_end(event.cancelled());
+                if std::mem::take(&mut self.protocols.client_gesture) {
+                    self.client_gesture(|state, pointer| {
+                        pointer.gesture_swipe_end(
+                            state,
+                            &ptr::GestureSwipeEndEvent {
+                                serial: SERIAL_COUNTER.next_serial(),
+                                time: event.time_msec(),
+                                cancelled: event.cancelled(),
+                            },
+                        );
+                    });
+                } else {
+                    self.gesture_end(event.cancelled());
+                }
             }
             InputEvent::GesturePinchBegin { event } => {
-                self.gesture_begin(crate::gestures::GestureKind::Pinch, event.fingers());
+                // Two-finger pinches zoom in the app; four fingers are the system's.
+                let fingers = event.fingers();
+                self.protocols.client_gesture = fingers < 4;
+                if self.protocols.client_gesture {
+                    self.client_gesture(|state, pointer| {
+                        pointer.gesture_pinch_begin(
+                            state,
+                            &ptr::GesturePinchBeginEvent {
+                                serial: SERIAL_COUNTER.next_serial(),
+                                time: event.time_msec(),
+                                fingers,
+                            },
+                        );
+                    });
+                } else {
+                    self.gesture_begin(crate::gestures::GestureKind::Pinch, fingers);
+                }
             }
             InputEvent::GesturePinchUpdate { event } => {
-                self.gesture_update(0.0, 0.0, Some(event.scale()));
+                if self.protocols.client_gesture {
+                    self.client_gesture(|state, pointer| {
+                        pointer.gesture_pinch_update(
+                            state,
+                            &ptr::GesturePinchUpdateEvent {
+                                time: event.time_msec(),
+                                delta: event.delta(),
+                                scale: event.scale(),
+                                rotation: event.rotation(),
+                            },
+                        );
+                    });
+                } else {
+                    self.gesture_update(0.0, 0.0, Some(event.scale()));
+                }
             }
             InputEvent::GesturePinchEnd { event } => {
-                self.gesture_end(event.cancelled());
+                if std::mem::take(&mut self.protocols.client_gesture) {
+                    self.client_gesture(|state, pointer| {
+                        pointer.gesture_pinch_end(
+                            state,
+                            &ptr::GesturePinchEndEvent {
+                                serial: SERIAL_COUNTER.next_serial(),
+                                time: event.time_msec(),
+                                cancelled: event.cancelled(),
+                            },
+                        );
+                    });
+                } else {
+                    self.gesture_end(event.cancelled());
+                }
+            }
+            InputEvent::GestureHoldBegin { event } => {
+                self.client_gesture(|state, pointer| {
+                    pointer.gesture_hold_begin(
+                        state,
+                        &ptr::GestureHoldBeginEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                            fingers: event.fingers(),
+                        },
+                    );
+                });
+            }
+            InputEvent::GestureHoldEnd { event } => {
+                self.client_gesture(|state, pointer| {
+                    pointer.gesture_hold_end(
+                        state,
+                        &ptr::GestureHoldEndEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                            cancelled: event.cancelled(),
+                        },
+                    );
+                });
+            }
+            InputEvent::TouchDown { event } => {
+                let Some(geometry) = self.space.output_geometry(&self.output) else {
+                    return;
+                };
+                let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                // A touch on a window brings it forward, like a click.
+                let window = self.space.element_under(location).map(|(w, _)| w.clone());
+                if let Some(window) = window {
+                    self.space.raise_element(&window, true);
+                    self.focus_window(Some(window));
+                }
+                let focus = if self.locked {
+                    None
+                } else {
+                    self.surface_under(location)
+                };
+                if let Some(touch) = self.seat.get_touch() {
+                    touch.down(
+                        self,
+                        focus,
+                        &touch::DownEvent {
+                            slot: event.slot(),
+                            location,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                        },
+                    );
+                }
+            }
+            InputEvent::TouchMotion { event } => {
+                let Some(geometry) = self.space.output_geometry(&self.output) else {
+                    return;
+                };
+                let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                let focus = self.surface_under(location);
+                if let Some(touch) = self.seat.get_touch() {
+                    touch.motion(
+                        self,
+                        focus,
+                        &touch::MotionEvent {
+                            slot: event.slot(),
+                            location,
+                            time: event.time_msec(),
+                        },
+                    );
+                }
+            }
+            InputEvent::TouchUp { event } => {
+                if let Some(touch) = self.seat.get_touch() {
+                    touch.up(
+                        self,
+                        &touch::UpEvent {
+                            slot: event.slot(),
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                        },
+                    );
+                }
+            }
+            InputEvent::TouchFrame { .. } => {
+                if let Some(touch) = self.seat.get_touch() {
+                    touch.frame(self);
+                }
+            }
+            InputEvent::TouchCancel { .. } => {
+                if let Some(touch) = self.seat.get_touch() {
+                    touch.cancel(self);
+                }
             }
             _ => {}
         }

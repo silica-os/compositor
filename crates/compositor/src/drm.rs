@@ -22,6 +22,7 @@ use smithay::backend::renderer::{Bind, ImportMem};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu};
+use smithay::desktop::utils::OutputPresentationFeedback;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
@@ -120,7 +121,8 @@ struct OutputSurface {
     connector: connector::Handle,
     crtc: crtc::Handle,
     mode: smithay::reexports::drm::control::Mode,
-    gbm: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>,
+    /// The user data of a queued frame: its presentation feedback, given back at vblank.
+    gbm: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, Option<OutputPresentationFeedback>>,
     damage_tracker: OutputDamageTracker,
 }
 
@@ -243,6 +245,7 @@ pub fn init_drm(
     let fd = DrmDeviceFd::new(DeviceFd::from(fd));
     let (mut drm, drm_events) =
         DrmDevice::new(fd.clone(), true).map_err(|e| format!("DRM device: {e}"))?;
+    let syncobj_fd = fd.clone();
     let gbm = GbmDevice::new(fd).map_err(|e| format!("GBM device: {e}"))?;
     let renderer = crate::egl::gbm_renderer(gbm.clone())?;
     let software = EGLDevice::device_for_display(renderer.egl_context().display())
@@ -317,6 +320,14 @@ pub fn init_drm(
         Backend::Drm(Box::new(backend)),
     )?;
     state.software_renderer = software;
+    state.apply_system_keymap();
+    // Explicit sync (linux-drm-syncobj), when the kernel driver can signal eventfds.
+    if smithay::wayland::drm_syncobj::supports_syncobj_eventfd(&syncobj_fd) {
+        let dh = display.handle();
+        state.protocols.syncobj =
+            Some(smithay::wayland::drm_syncobj::DrmSyncobjState::new::<State>(&dh, syncobj_fd));
+        info!("explicit sync on");
+    }
     if let Backend::Drm(backend) = &state.backend {
         let dh = display.handle();
         state.dmabuf_global = Some(crate::dmabuf::create_global(
@@ -543,10 +554,17 @@ impl State {
         if surface.crtc != crtc {
             return;
         }
-        if let Err(err) = surface.gbm.frame_submitted() {
-            warn!("DRM: frame submitted: {err}");
-        }
+        let feedback = match surface.gbm.frame_submitted() {
+            Ok(feedback) => feedback.flatten(),
+            Err(err) => {
+                warn!("DRM: frame submitted: {err}");
+                None
+            }
+        };
         backend.pending = false;
+        if let Some(feedback) = feedback {
+            self.presented(feedback);
+        }
         self.render_drm();
     }
 
@@ -792,10 +810,12 @@ impl State {
         if !ready {
             // Clients still get their frame callbacks, at the idle rate.
             self.send_frames();
+            self.signal_frame_barriers();
             return;
         }
         // The same frame preparation as the headless backend.
         let speed = self.animation_speed;
+        let feedback = self.take_presentation_feedback();
         let glass_quality = self.glass_quality();
         self.closing.retain(|closing| !closing.finished(now, speed));
         self.genies.retain(|genie| !genie.finished(now, speed));
@@ -930,7 +950,7 @@ impl State {
             };
             surface
                 .gbm
-                .queue_buffer(Some(result.sync), Some(damage), ())
+                .queue_buffer(Some(result.sync), Some(damage), Some(feedback))
                 .map_err(|e| format!("queue: {e}"))?;
             Ok(true)
         })();
@@ -952,6 +972,7 @@ impl State {
         backend.last_dark = dark;
         self.perf.rendered(now.elapsed());
         self.send_frames();
+        self.signal_frame_barriers();
     }
 }
 

@@ -166,6 +166,8 @@ pub struct State {
     pub locked_focus: Option<smithay::desktop::Window>,
     /// ext-session-lock: the manager's state and the client that holds the lock.
     pub session_lock_state: smithay::wayland::session_lock::SessionLockManagerState,
+    /// The standard protocols beyond the core (protocols.rs).
+    pub protocols: crate::protocols::Protocols,
     pub lock_client: crate::lock::LockClient,
     pub lock_config: crate::config::LockConfig,
     pub saver_config: crate::config::SaverConfig,
@@ -346,6 +348,7 @@ impl State {
         backend: Backend,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let dh = display.handle();
+        let protocols = crate::protocols::Protocols::new(&dh);
         let compositor_state = CompositorState::new::<State>(&dh);
         let xdg_shell_state = XdgShellState::new::<State>(&dh);
         let shm_state = ShmState::new::<State>(&dh, vec![]);
@@ -374,6 +377,7 @@ impl State {
         let (delay, rate) = key_repeat();
         seat.add_keyboard(Default::default(), delay, rate)?;
         seat.add_pointer();
+        seat.add_touch();
 
         let _global = output.create_global::<State>(&dh);
         let mut space = Space::default();
@@ -487,6 +491,7 @@ impl State {
             locked: false,
             locked_focus: None,
             session_lock_state,
+            protocols,
             lock_client: crate::lock::LockClient::default(),
             lock_config: crate::config::LockConfig::default(),
             saver_config: crate::config::SaverConfig::default(),

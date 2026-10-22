@@ -104,6 +104,9 @@ pub fn init_headless(
             data.state.advance_spaces(std::time::Instant::now());
             data.state.advance_panorama(std::time::Instant::now());
             data.state.send_frames();
+            let feedback = data.state.take_presentation_feedback();
+            data.state.presented(feedback);
+            data.state.signal_frame_barriers();
             TimeoutAction::ToDuration(HEADLESS_FRAME)
         })?;
     if let Backend::Headless(Headless::Gles(renderer)) = &state.backend {
