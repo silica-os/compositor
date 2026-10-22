@@ -27,12 +27,30 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    #[cfg(feature = "drm")]
+    if options.backend == BackendKind::Drm {
+        software_rasterizer_without_jit();
+    }
     match compositor::run(options) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             tracing::error!("{err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// When no GPU renders (no Mesa driver for the DRM device, or virtio-gpu without 3D), Mesa falls
+/// back to llvmpipe, whose shaders are machine code generated at run time: IPE refuses to execute
+/// anonymous memory, so llvmpipe crashes. softpipe interprets the shaders instead.
+/// `GALLIUM_DRIVER` picks only the software driver; hardware drivers ignore it. The clients the
+/// compositor starts inherit it. Called while the process has one thread.
+#[cfg(feature = "drm")]
+#[allow(unsafe_code)]
+fn software_rasterizer_without_jit() {
+    if std::env::var_os("GALLIUM_DRIVER").is_none() {
+        // SAFETY: no other thread exists yet, nothing reads the environment concurrently.
+        unsafe { std::env::set_var("GALLIUM_DRIVER", "softpipe") };
     }
 }
 
