@@ -373,6 +373,7 @@ impl State {
         let window_manager_state = crate::window_appearance::WindowManagerState::new(&dh);
         let app_menus = crate::app_menu::AppMenus::new(&dh);
         let idle_notifications = crate::idle_notify::IdleNotifications::new(&dh);
+        crate::image_copy::create_globals(&dh);
         let foreign_toplevel_list = crate::shell::toplevel_list(&dh);
         let shell_manager_state = crate::shell::ShellManagerState::new(&dh);
         // Only the shell's locker may lock the session.
