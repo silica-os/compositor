@@ -21,7 +21,7 @@ top.
   regions do not merge). A client bound to version 1 that asks for it gets an
   `invalid_region` error; the embedder falls back to `thick` there. Since Amalfi the
   declared material only picks the kind of surface of a region without a profile (below):
-  every kind is drawn with its Amalfi material, Glass/Regular or Glass/Thick
+  every kind is drawn with Glass/Regular, the one Amalfi glass of the shell
   (`docs/design/amalfi/materials.md`, [`m2-glass.md`](m2-glass.md)).
 - Errors: `invalid_region` (non-positive size, negative or non-finite radius, unknown
   material), `too_many_regions` (over 64). The client is disconnected; the compositor goes on.

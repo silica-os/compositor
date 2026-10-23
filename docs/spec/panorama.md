@@ -21,7 +21,7 @@ Panorama is Silica's overview of all windows and spaces. Values measured on macO
 |---|---|---|
 | Height | 40 pt, full width, at the top | 170 pt |
 | Shadow below | soft, ~62 pt | soft, ~40 pt |
-| Fill | Glass/Thick over the wallpaper under the bar (σ 16, saturation 1.5, tint `#FFFFFF` / `#2A2B30` at 76 %, 1 pt inside rim, rim light), light and dark | same |
+| Fill | Glass/Regular over the wallpaper under the bar (σ 8, saturation 1.1, tint `#FFFFFF` at 50 % / `#2A2B30` at 59 %, 1 pt inside rim, rim light), light and dark | same |
 | Content | space names side by side, centred on screen | thumbnails with names under them |
 | "+" | 20 × 20 pt cross, 2 pt stroke, 16 pt from the right edge, centre y 20; light `#4c4c4c`, dark `#e5e5e5` | same cross, centre y 101.5 |
 

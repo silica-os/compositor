@@ -76,8 +76,8 @@ impl EdgeProfile {
 }
 
 impl Edge {
-    /// No edge of the material's own (Glass/Regular and Glass/Thick draw the Amalfi rims of
-    /// their profile instead).
+    /// No edge of the material's own (Glass/Regular draws the Amalfi rims of
+    /// its profile instead).
     pub const NONE: Self = Self {
         top: EdgeProfile::NONE,
         side: EdgeProfile::NONE,

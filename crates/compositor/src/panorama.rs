@@ -8,7 +8,7 @@
 //!   scaled rows, centered group.
 //! - The wallpaper behind the windows stays exactly as at rest (no blur, dim or tint); the
 //!   menu bar and the desktop icons fade out, the spaces bar comes down in the menu bar's
-//!   place, 40 pt tall: Glass/Thick over the wallpaper under it (and only that; design decision,
+//!   place, 40 pt tall: Glass/Regular over the wallpaper under it (and only that; design decision,
 //!   not the measured grey tone), ~60 pt shadow; the Dock stays.
 //! - Opening and closing: progressive slowdown with a long tail, 50 % in ~40–54 ms, 90 % in
 //!   ~130–140 ms, done in ~300 ms (tables measured frame by frame).
@@ -28,7 +28,7 @@ use crate::state::State;
 pub const BAR_HEIGHT: f64 = 40.0;
 /// Shadow under the bar: ~60 pt compact, ~45 pt (and lighter) expanded (MC-BLUR).
 pub const BAR_SHADOW: f64 = 60.0;
-/// The bar is Glass/Thick over the wallpaper under it (`bar_region`).
+/// The bar is Glass/Regular over the wallpaper under it (`bar_region`).
 /// The shadow below the bar darkens the wallpaper at its top edge: from `#626367` (compact,
 /// ~20 %) and from `#6a6b6f` (expanded, ~13 %) back to `#7a7b80`. Dark: not measured.
 const BAR_SHADOW_ALPHA: f64 = 0.2;
@@ -1762,7 +1762,7 @@ pub fn draw_bar(canvas: &mut Canvas, look: &BarLook) {
     let e = look.expansion.clamp(0.0, 1.0);
     let w = look.width as f32;
     let height = bar_height(e);
-    // The fill is the material drawn behind this sprite (Glass/Thick, with its own rims).
+    // The fill is the material drawn behind this sprite (Glass/Regular, with its own rims).
     let bar = height as f32;
     // Shadow: black fading to zero.
     let shadow = BAR_SHADOW + (EXPANDED_SHADOW - BAR_SHADOW) * e;
@@ -2082,7 +2082,7 @@ pub fn bar_alpha(progress: f64) -> f32 {
     (progress * 4.0).clamp(0.0, 1.0) as f32
 }
 
-/// Where the bar material (Glass/Thick over what is under the bar) shows: the bar fill,
+/// Where the bar material (Glass/Regular over what is under the bar) shows: the bar fill,
 /// without the shadow.
 pub fn bar_material_rect(width: f64, expansion: f64, progress: f64) -> Rectangle<f64, Logical> {
     Rectangle::new(
@@ -2091,10 +2091,9 @@ pub fn bar_material_rect(width: f64, expansion: f64, progress: f64) -> Rectangle
     )
 }
 
-/// The glass region of the spaces bar (physical pixels): Glass/Thick exactly like the Amalfi
-/// kinds that are thick (σ 10, saturation 1.1, tint 58 %, refraction, inside rim, rim light, and their blur
-/// scale, which the equivalence test covers), without the kind's drop shadow (the bar's sprite
-/// draws its own).
+/// The glass region of the spaces bar (physical pixels): Glass/Regular exactly like every Amalfi
+/// kind (σ 8, saturation 1.1, tint, refraction, inside rim, rim light, and the blur scale, which
+/// the equivalence test covers), without the kind's drop shadow (the bar's sprite draws its own).
 pub fn bar_region(
     rect: Rectangle<i32, smithay::utils::Physical>,
     dark: bool,
@@ -2102,7 +2101,7 @@ pub fn bar_region(
     scale: f64,
 ) -> compositor_render::glass::PhysicalRegion {
     use compositor_render::glass_profile::GlassKind;
-    // Panel is a thick kind with no sharp share.
+    // Panel is a kind with no sharp share.
     let kind = GlassKind::Panel;
     compositor_render::glass::PhysicalRegion {
         rect,
@@ -2324,24 +2323,24 @@ mod tests {
     }
 
     #[test]
-    fn the_bar_is_glass_thick_in_light_and_dark() {
+    fn the_bar_is_glass_regular_in_light_and_dark() {
         use compositor_render::glass_profile::Amalfi;
         let rect = Rectangle::new((0, 0).into(), (1920, 40).into());
         for dark in [false, true] {
             let region = bar_region(rect, dark, 1.0, 1.0);
-            let thick = Amalfi::Thick.material(dark);
-            // Exactly the Amalfi Thick material: σ 10, saturation 1.1, brightness, tint 58 %, rims.
-            assert_eq!(region.sigma(), 10.0);
+            let regular = Amalfi::Regular.material(dark);
+            // Exactly the Amalfi Regular material: σ 8, saturation 1.1, brightness, tint, rims.
+            assert_eq!(region.sigma(), 8.0);
             assert_eq!(region.profile.saturation, 1.1);
-            assert_eq!(region.profile.brightness, thick.brightness);
-            assert_eq!(region.profile.tint, thick.tint);
-            assert_eq!(region.profile.inside_rim, thick.inside_rim);
-            assert_eq!(region.profile.rim_light, thick.rim_light);
+            assert_eq!(region.profile.brightness, regular.brightness);
+            assert_eq!(region.profile.tint, regular.tint);
+            assert_eq!(region.profile.inside_rim, regular.inside_rim);
+            assert_eq!(region.profile.rim_light, regular.rim_light);
             let tint: [u8; 3] = if dark { [42, 43, 48] } else { [255, 255, 255] };
             for (got, want) in region.profile.tint.iter().zip(tint) {
                 assert!((got * 255.0 - f32::from(want)).abs() < 0.5);
             }
-            assert!((region.profile.tint[3] - 0.58).abs() < 0.005);
+            assert!((region.profile.tint[3] - regular.tint[3]).abs() < 0.005);
             assert_eq!(region.profile.inside_rim.width, 1.0);
             let rim = if dark { 0.40 } else { 0.12 };
             assert!((region.profile.inside_rim.color[3] - rim).abs() < 0.005);

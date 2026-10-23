@@ -6,7 +6,7 @@
 //! images, text, sharp edges, light and dark) at full resolution and at its `BlurScale`; the
 //! two may differ by at most 1/255 on average over the glass and 3/255 at any pixel and
 //! channel. `GLASS_EQUIVALENCE_WALLPAPERS` (PNG paths separated by `:`) adds real wallpapers;
-//! The Panorama spaces bar is Glass/Thick: it uses the thick kinds' profile and so their scale.
+//! The Panorama spaces bar is Glass/Regular: it uses the panels' profile and so their scale.
 //! `cargo test -p compositor glass_equivalence -- --ignored --nocapture` prints the table every
 //! factor gives, to choose the scales.
 
@@ -764,7 +764,7 @@ fn crossing(image: &Image, channel: usize, line: i32, expected: i32, horizontal:
 fn the_edge_band_bends_the_stripes_and_the_centre_does_not() {
     let mut gpu = gpu();
     for kind in [GlassKind::Dock, GlassKind::Menu] {
-        // The glass is 280 × 120: the band is `depth × 60` px (21 for Regular, 16.8 for Thick).
+        // The glass is 280 × 120: the band is `depth × 60` px (19.2 for Regular).
         // Stripe edges 6 px inside the left edge (x 66) and the top edge (y 26), and in the
         // middle (x 206, y 86).
         for horizontal in [false, true] {
@@ -783,13 +783,9 @@ fn the_edge_band_bends_the_stripes_and_the_centre_does_not() {
             let in_band = shift(near, 1);
             let in_centre = shift(centre, 1);
             eprintln!("{kind:?} horizontal {horizontal}: band {in_band:.2}, centre {in_centre:.2}");
-            // Towards the inside, by about the distortion × the band at that depth
-            // (Regular 2.3 px, Thick 1.2 px).
-            let (low, high) = if kind == GlassKind::Dock {
-                (1.5, 4.0)
-            } else {
-                (0.8, 2.5)
-            };
+            // Towards the inside, by about the distortion × the band at that depth (2.3 px):
+            // the Dock and the menus are both Glass/Regular.
+            let (low, high) = (1.5, 4.0);
             assert!(
                 (low..high).contains(&in_band),
                 "{kind:?} horizontal {horizontal}: band shift {in_band:.2}"

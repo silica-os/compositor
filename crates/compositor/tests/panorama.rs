@@ -493,21 +493,21 @@ fn near(got: [u8; 3], want: [u8; 3], tolerance: u8) -> bool {
         .all(|(a, b)| a.abs_diff(b) <= tolerance)
 }
 
-/// What Glass/Thick shows over a flat `gray` (0-255, encoded): the tint over the saturated
+/// What Glass/Regular shows over a flat `gray` (0-255, encoded): the tint over the saturated
 /// gray, the way the glass pass composes it.
-fn thick_over(dark: bool, gray: [f32; 3]) -> [u8; 3] {
+fn regular_over(dark: bool, gray: [f32; 3]) -> [u8; 3] {
     let profile = compositor_render::glass_profile::GlassKind::Panel.profile(dark);
     let [r, g, b] = compositor_render::glass::profile_color(&profile, gray.map(|c| c / 255.0));
     [r, g, b].map(|c| (c * 255.0).round() as u8)
 }
 
 #[test]
-fn the_spaces_bar_is_glass_thick_over_the_wallpaper() {
+fn the_spaces_bar_is_glass_regular_over_the_wallpaper() {
     let gray = compositor_render::glass::REFERENCE_GRAY.map(|c| c * 255.0);
     for dark in [false, true] {
-        let want = thick_over(dark, gray);
-        // Light: ~#cdced0 over the reference gray; dark: much darker.
-        assert!(if dark { want[0] < 80 } else { want[0] > 200 }, "{want:?}");
+        let want = regular_over(dark, gray);
+        // Light: ~#c8c8cc over the reference gray; dark: much darker.
+        assert!(if dark { want[0] < 80 } else { want[0] > 190 }, "{want:?}");
         let name = if dark {
             "panorama-bar-dark"
         } else {
@@ -560,7 +560,7 @@ fn the_spaces_bar_blurs_the_wallpaper_under_it_with_sigma_10() {
     c.call(PANORAMA_TOGGLE, Value::Null).unwrap();
     let shot = screenshot(&compositor);
     // The stripes (period 16 px) are wiped out by σ 10: the mean gray under the tint.
-    let mean = thick_over(true, [127.5; 3]);
+    let mean = regular_over(true, [127.5; 3]);
     for x in (100..500).step_by(7) {
         let v = rgb_at(&shot, f64::from(x), 20.0);
         assert!(near(v, mean, 4), "stripes at {x}: {v:?} vs {mean:?}");

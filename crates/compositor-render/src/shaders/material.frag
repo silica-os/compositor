@@ -329,7 +329,7 @@ void main() {
     // Lens: the pixel at distance t samples the background at distance s along the normal
     // (glass.md, "Refraction"). The profile scales the band's width (the curve keeps its
     // shape: evaluated at t / width, its displacement times width) and the displacement.
-    // The Amalfi glass materials (Regular, Thick) use it as a refraction at the edge: the curve
+    // The Amalfi glass (Regular) uses it as a refraction at the edge: the curve
     // pulls the backdrop in over a band along the edge, nothing past it, and `chromatic` splits
     // the red and blue samples a little along the normal.
     vec2 sample_at = p;

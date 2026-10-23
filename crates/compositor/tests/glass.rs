@@ -203,8 +203,8 @@ fn amalfi_fill(color: [f64; 3], tint: [f64; 3], fill: Fill) -> [u8; 3] {
 
 /// The reference gray of the glass tests, `#7a7b80`.
 const GRAY: [f64; 3] = [122.0, 123.0, 128.0];
-/// The tints of `tokens.json`: white in light, `#2A2B30` in dark; 60 % on Glass/Regular, 58 %
-/// (`94`) on Glass/Thick.
+/// The tints of `tokens.json`: white in light (`80`), `#2A2B30` in dark (`96`), on Glass/Regular,
+/// the one glass of every protocol material but Clear.
 const TINT_LIGHT: [f64; 3] = [255.0; 3];
 const TINT_DARK: [f64; 3] = [42.0, 43.0, 48.0];
 /// The tint amount and the backdrop brightness of a material in an appearance.
@@ -214,20 +214,12 @@ struct Fill {
     brightness: f64,
 }
 const REGULAR_LIGHT: Fill = Fill {
-    amount: 0.6,
-    brightness: 1.25,
+    amount: 128.0 / 255.0,
+    brightness: 1.18,
 };
 const REGULAR_DARK: Fill = Fill {
-    amount: 0.6,
-    brightness: 1.10,
-};
-const THICK_LIGHT: Fill = Fill {
-    amount: 148.0 / 255.0,
-    brightness: 1.12,
-};
-const THICK_DARK: Fill = Fill {
-    amount: 148.0 / 255.0,
-    brightness: 1.05,
+    amount: 150.0 / 255.0,
+    brightness: 1.07,
 };
 
 /// The largest channel difference between two colors.
@@ -240,7 +232,7 @@ fn worst(a: [u8; 3], b: [u8; 3]) -> u8 {
 }
 
 /// Light (or dark, `--appearance dark`) glass on the reference gray: a `clear` region (the
-/// Dock: Glass/Regular) at (32, 32) and a `thick` one (a menu: Glass/Thick) at (330, 200).
+/// Dock) at (32, 32) and a `thick` one (a menu) at (330, 200), both Glass/Regular.
 fn fills_on_gray(name: &str, dark: bool) -> ([u8; 3], [u8; 3]) {
     let mut args = vec!["--background", "7a7b80"];
     if dark {
@@ -272,16 +264,15 @@ fn fills_on_gray(name: &str, dark: bool) -> ([u8; 3], [u8; 3]) {
 fn materials_on_the_reference_gray_are_the_amalfi_fill() {
     let (regular, thick) = fills_on_gray("glass-gray", false);
     let want_regular = amalfi_fill(GRAY, TINT_LIGHT, REGULAR_LIGHT);
-    let want_thick = amalfi_fill(GRAY, TINT_LIGHT, THICK_LIGHT);
+    let want_thick = amalfi_fill(GRAY, TINT_LIGHT, REGULAR_LIGHT);
     eprintln!("regular {regular:?} (Amalfi {want_regular:?}), thick {thick:?} ({want_thick:?})");
     assert!(
         worst(regular, want_regular) <= 2,
         "Glass/Regular {regular:?}"
     );
-    assert!(worst(thick, want_thick) <= 2, "Glass/Thick {thick:?}");
-    // Regular glass is the brighter one in light (×1.25 against ×1.12, tint 60 % against 58 %
-    // of white).
-    assert!(thick[1] < regular[1]);
+    assert!(worst(thick, want_thick) <= 2, "menu {thick:?}");
+    // The protocol's thick material is Glass/Regular as well.
+    assert!(thick[1].abs_diff(regular[1]) <= 2);
 }
 
 /// In dark (`--appearance dark`) the tint is `#2A2B30`.
@@ -289,14 +280,14 @@ fn materials_on_the_reference_gray_are_the_amalfi_fill() {
 fn dark_materials_on_the_reference_gray() {
     let (regular, thick) = fills_on_gray("glass-gray-dark", true);
     let want_regular = amalfi_fill(GRAY, TINT_DARK, REGULAR_DARK);
-    let want_thick = amalfi_fill(GRAY, TINT_DARK, THICK_DARK);
+    let want_thick = amalfi_fill(GRAY, TINT_DARK, REGULAR_DARK);
     eprintln!("regular {regular:?} (Amalfi {want_regular:?}), thick {thick:?} ({want_thick:?})");
     assert!(
         worst(regular, want_regular) <= 2,
         "Glass/Regular {regular:?}"
     );
-    assert!(worst(thick, want_thick) <= 2, "Glass/Thick {thick:?}");
-    // In dark the two are within a level or two of each other.
+    assert!(worst(thick, want_thick) <= 2, "menu {thick:?}");
+    // The same glass: within a level or two of each other.
     assert!(thick[1].abs_diff(regular[1]) <= 3);
 }
 
@@ -320,7 +311,7 @@ fn glass_of_a_dark_window_in_a_light_session_has_the_dark_tone() {
         .unwrap();
     let shot = shot(&compositor, "glass-override-dark.png");
     let got = rgb(&shot, 430, 250);
-    let expected = amalfi_fill(GRAY, TINT_DARK, THICK_DARK);
+    let expected = amalfi_fill(GRAY, TINT_DARK, REGULAR_DARK);
     assert!(
         worst(got, expected) <= 2,
         "thick glass of a dark window: {got:?}, expected {expected:?}"
@@ -345,7 +336,7 @@ fn normal_cdf(x: f64) -> f64 {
 }
 
 #[test]
-fn regular_glass_blurs_a_stripe_edge_with_sigma_6() {
+fn regular_glass_blurs_a_stripe_edge_with_sigma_8() {
     let compositor = start_at_32("glass-blur", SHOT, &[]);
     let back = (400, 200);
     let _stripes = TestWindow::open_pixels(&compositor.wayland, "stripes", back, &stripes(back));
@@ -361,7 +352,7 @@ fn regular_glass_blurs_a_stripe_edge_with_sigma_6() {
         .map(|x| f64::from(rgb(&shot, x, 114)[1]))
         .collect();
     // Glass/Regular over a gray step: the sharp share (0.28 on the Dock) plus a Gaussian of σ
-    // `sigma` px, the brightness (×1.25 in light, clamped) and 60 % white (gray does not change
+    // `sigma` px, the brightness (×1.18 in light, clamped) and 50 % white (gray does not change
     // with the saturation).
     let model = |sigma: f64, edge: f64, x: f64| {
         let sharp = if x >= edge { 255.0 } else { 0.0 };
@@ -383,11 +374,11 @@ fn regular_glass_blurs_a_stripe_edge_with_sigma_6() {
             })
             .fold(f64::MAX, f64::min)
     };
-    let (rms3, rms6, rms12) = (fit(3.0), fit(6.0), fit(12.0));
+    let (rms4, rms8, rms16) = (fit(4.0), fit(8.0), fit(16.0));
     eprintln!("row {row:?}");
-    eprintln!("rms against σ 3 px {rms3:.2}, σ 6 px {rms6:.2}, σ 12 px {rms12:.2}");
-    assert!(rms6 <= 2.0, "the edge is not a σ 6 blur: rms {rms6:.2}");
-    assert!(rms6 < rms3 && rms6 < rms12);
+    eprintln!("rms against σ 4 px {rms4:.2}, σ 8 px {rms8:.2}, σ 16 px {rms16:.2}");
+    assert!(rms8 <= 2.0, "the edge is not a σ 8 blur: rms {rms8:.2}");
+    assert!(rms8 < rms4 && rms8 < rms16);
 }
 
 /// The Amalfi rims of a capsule on the reference gray at 1×: the inside rim (1 pt of black, 12 %
@@ -574,7 +565,7 @@ fn without_blur_dark_glass_is_its_tint_over_the_window_surface() {
         .unwrap();
     let got = rgb(&shot(&compositor, "glass-opaque-dark.png"), 132, 82);
     let mix =
-        |surface: f64, tint: f64| (surface + (tint - surface) * THICK_DARK.amount).round() as u8;
+        |surface: f64, tint: f64| (surface + (tint - surface) * REGULAR_DARK.amount).round() as u8;
     let want = [mix(27.0, 42.0), mix(28.0, 43.0), mix(31.0, 48.0)];
     assert!(
         worst(got, want) <= 1,
@@ -594,7 +585,7 @@ fn the_regular_protocol_material_is_the_thick_glass_of_the_modules() {
         .set_glass(&[(0, 0, 200, 100, 0.0, Material::Regular)])
         .unwrap();
     let fill = rgb(&shot(&compositor, "glass-module-fill.png"), 132, 82);
-    let want = amalfi_fill(GRAY, TINT_LIGHT, THICK_LIGHT);
+    let want = amalfi_fill(GRAY, TINT_LIGHT, REGULAR_LIGHT);
     eprintln!("fill: {fill:?} (Amalfi {want:?})");
     assert!(worst(fill, want) <= 2, "module fill {fill:?}");
 }

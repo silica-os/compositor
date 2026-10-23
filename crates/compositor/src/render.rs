@@ -66,7 +66,7 @@ render_elements! {
     Filtered=smithay::backend::renderer::gles::element::TextureShaderElement,
 }
 
-/// The glass of the spaces bar (Glass/Thick, over the wallpaper only), between frames.
+/// The glass of the spaces bar (Glass/Regular, over the wallpaper only), between frames.
 #[derive(Default)]
 struct BarGlass(GlassCache);
 
@@ -1714,7 +1714,7 @@ pub fn output_elements(
             }
         }
     }
-    // The spaces bar is Glass/Thick over the wallpaper under it (and only that: no windows, no
+    // The spaces bar is Glass/Regular over the wallpaper under it (and only that: no windows, no
     // Dock), just behind the bar's sprite.
     if let Some(panorama) = &context.panorama
         && let Some(id) = &bar_id

@@ -1,10 +1,10 @@
 //! Glass profiles: the Amalfi materials and the settings of the glass per kind of surface
 //! (silica-glass-v1 version 7).
 //!
-//! Silica 1.0 "Amalfi" has three glass materials (`docs/design/amalfi/materials.md`, values
-//! from `docs/design/amalfi/tokens.json` → `materials`, `shadows`, `colors.*.Glass/*`):
-//! Glass/Regular, Glass/Thick and Glass/Clear (the lens). Every kind of surface the protocol
-//! names is drawn with one of them ([`GlassKind::amalfi`]), in the render order of the spec:
+//! Silica 1.0 "Amalfi" has two glass materials, like Apple's (ui-kit `tokens.json` →
+//! `materials`, `shadows.glass`, `colors.*.Glass/*`): Glass/Regular, the one glass of every
+//! surface the protocol names ([`GlassKind::amalfi`]), and Glass/Clear, the nearly transparent
+//! glass for overlays on media. They are drawn in the render order of the spec:
 //! backdrop → blur → saturation → tint fill → inside rim → rim light (the top inner edge) →
 //! drop shadow outside the shape.
 //!
@@ -39,14 +39,12 @@ pub enum GlassKind {
     Banner,
 }
 
-/// The three Amalfi glass materials.
+/// The two Amalfi glass materials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Amalfi {
-    /// Light objects close to content: the Dock, banners, HUDs, toolbar controls.
+    /// The glass of controls, bars, menus, popovers, panels, banners and the Dock.
     Regular,
-    /// Panels you read from: menus, popovers, Faro, the Control Center modules, sheets.
-    Thick,
-    /// The transient lens over a pressed or dragged control (drawn by `silica_ui`).
+    /// Static, nearly transparent glass for overlays on media.
     Clear,
 }
 
@@ -161,8 +159,8 @@ pub const fn bend_curve(distortion: f32) -> [(f32, f32); 7] {
     ]
 }
 
-static BEND_REGULAR: [(f32, f32); 7] = bend_curve(0.30);
-static BEND_THICK: [(f32, f32); 7] = bend_curve(0.22);
+static BEND_REGULAR: [(f32, f32); 7] = bend_curve(0.26);
+static BEND_CLEAR: [(f32, f32); 7] = bend_curve(0.30);
 
 /// The band of the refraction on a shape whose smaller side is `thickness` points, relative to
 /// the reference band: `depth × thickness / 2`, at most [`REFRACTION_BAND_PT`].
@@ -186,7 +184,7 @@ pub struct AmalfiMaterial {
     pub tint: [f32; 4],
     pub inside_rim: InsideRim,
     pub rim_light: RimLight,
-    /// The drop shadow outside the shape (`shadows.2`, `shadows.3`).
+    /// The drop shadow outside the shape (`shadows.glass`).
     pub shadow: GlassShadow,
     /// `Surface/Window`: what the tint covers when the glass cannot blur (reduced transparency).
     pub fallback: [f32; 3],
@@ -222,11 +220,9 @@ const fn drop_shadow(color: u32, y: f32, blur: f32) -> GlassShadow {
 const SURFACE_WINDOW_LIGHT: [f32; 3] = opaque(0xFFFFFF);
 const SURFACE_WINDOW_DARK: [f32; 3] = opaque(0x1B1C1F);
 
-/// `shadows.2` (Glass/Regular) and `shadows.3` (Glass/Thick), light and dark (~2× denser).
-const SHADOW_2_LIGHT: GlassShadow = drop_shadow(0x0000001F, 4.0, 12.0);
-const SHADOW_2_DARK: GlassShadow = drop_shadow(0x00000052, 4.0, 12.0);
-const SHADOW_3_LIGHT: GlassShadow = drop_shadow(0x0000002E, 12.0, 32.0);
-const SHADOW_3_DARK: GlassShadow = drop_shadow(0x0000005C, 12.0, 32.0);
+/// `shadows.glass` (Glass/Regular), light and dark (~2× denser).
+const SHADOW_GLASS_LIGHT: GlassShadow = drop_shadow(0x00000029, 8.0, 20.0);
+const SHADOW_GLASS_DARK: GlassShadow = drop_shadow(0x00000058, 8.0, 20.0);
 
 /// The glass level that leaves the measured materials as they are.
 pub const GLASS_LEVEL_DEFAULT: f32 = 0.5;
@@ -253,13 +249,12 @@ const RIM_LIGHT_DARK: RimLight = RimLight {
 };
 
 impl Amalfi {
-    pub const ALL: [Self; 3] = [Self::Regular, Self::Thick, Self::Clear];
+    pub const ALL: [Self; 2] = [Self::Regular, Self::Clear];
 
     /// The name of the material in the kit and in `tokens.json`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Regular => "Glass/Regular",
-            Self::Thick => "Glass/Thick",
             Self::Clear => "Glass/Clear",
         }
     }
@@ -267,8 +262,8 @@ impl Amalfi {
     /// The lens curve of the material's refraction (for the reference band, see [`bend_curve`]).
     pub fn lens(self) -> Lens {
         let curve: &'static [(f32, f32)] = match self {
-            Self::Regular | Self::Clear => &BEND_REGULAR,
-            Self::Thick => &BEND_THICK,
+            Self::Regular => &BEND_REGULAR,
+            Self::Clear => &BEND_CLEAR,
         };
         Lens {
             side: curve,
@@ -286,43 +281,30 @@ impl Amalfi {
         };
         match self {
             Self::Regular => AmalfiMaterial {
-                sigma: 6.0,
+                sigma: 8.0,
                 saturation: 1.1,
-                brightness: if dark { 1.10 } else { 1.25 },
+                brightness: if dark { 1.07 } else { 1.18 },
                 refraction: Refraction {
-                    distortion: 0.30,
-                    depth: 0.35,
-                    chromatic: 0.03,
+                    distortion: 0.26,
+                    depth: 0.32,
+                    chromatic: 0.022,
                 },
-                tint: token(if dark { 0x2A2B3099 } else { 0xFFFFFF99 }),
+                tint: token(if dark { 0x2A2B3096 } else { 0xFFFFFF80 }),
                 inside_rim,
                 rim_light,
-                shadow: if dark { SHADOW_2_DARK } else { SHADOW_2_LIGHT },
-                fallback,
-            },
-            Self::Thick => AmalfiMaterial {
-                sigma: 10.0,
-                saturation: 1.1,
-                brightness: if dark { 1.05 } else { 1.12 },
-                refraction: Refraction {
-                    distortion: 0.22,
-                    depth: 0.28,
-                    chromatic: 0.015,
+                shadow: if dark {
+                    SHADOW_GLASS_DARK
+                } else {
+                    SHADOW_GLASS_LIGHT
                 },
-                tint: token(if dark { 0x2A2B3094 } else { 0xFFFFFF94 }),
-                inside_rim,
-                rim_light,
-                shadow: if dark { SHADOW_3_DARK } else { SHADOW_3_LIGHT },
                 fallback,
             },
-            // The refraction, magnification, specular highlight and brightness of the lens are
-            // `silica_ui`'s (the lens is a client-side effect over a control): here only what the
+            // The magnification and specular highlight are the client's: here only what the
             // glass pass would draw.
             Self::Clear => AmalfiMaterial {
                 sigma: 2.0,
                 saturation: 1.0,
                 brightness: if dark { 0.98 } else { 1.04 },
-                // The magnification (1.1×) is `silica_ui`'s, like the lens itself.
                 refraction: Refraction {
                     distortion: 0.30,
                     depth: 0.50,
@@ -345,7 +327,7 @@ pub struct GlassProfile {
     /// σ of the blur in points; `None`: the material's.
     pub sigma: Option<f64>,
     /// Strength of the edge lens (`MaterialParams::lens`): 1 the material's displacement, 0
-    /// none. Glass/Regular and Glass/Thick refract at their edge (1).
+    /// none. Glass/Regular refracts at its edge (1).
     pub refraction: f32,
     /// Width of the refraction band: this fraction of half the shorter side of the shape
     /// ([`refraction_band`]); 0: the profile's `falloff` and the lens's own reach ([`lens_width`]).
@@ -526,25 +508,15 @@ impl GlassKind {
         Self::ALL.into_iter().find(|kind| kind.name() == name)
     }
 
-    /// The Amalfi material of this kind ("Where each material goes" in
-    /// `docs/design/amalfi/materials.md`): what you read from is thick (menus, status menus,
-    /// popovers, tooltips, Faro and the launcher, the Control Center modules and their detail
-    /// views, the Notification Centre panel, sheets and system alerts), light objects close to
-    /// content are regular (the Dock and the app switcher, toolbar controls, banners).
+    /// The Amalfi material of this kind: Glass/Regular, the one glass of every kind (Clear
+    /// only sits over media, inside clients).
     pub fn amalfi(self) -> Amalfi {
-        match self {
-            Self::Menu
-            | Self::Popover
-            | Self::Panel
-            | Self::Module
-            | Self::Tooltip
-            | Self::Sheet => Amalfi::Thick,
-            Self::Dock | Self::Control | Self::Banner => Amalfi::Regular,
-        }
+        Amalfi::Regular
     }
 
     /// The share of the sharp backdrop mixed into the blur: the one each kind had before Amalfi
-    /// (the Dock's 0.28, the thin glass's 0.04, the banners' 0.03 / 0.02, none on thick glass),
+    /// (the Dock's 0.28, the modules' and controls' 0.04, the banners' 0.03 / 0.02, none on
+    /// menus, popovers, panels, tooltips and sheets),
     /// until it is tuned against the kit's images.
     pub fn sharp(self, dark: bool) -> f32 {
         match self {
@@ -584,17 +556,9 @@ impl GlassKind {
     /// 58–60 % of the backdrop, so a reduced blur shows even less than it did before Amalfi.
     fn blur_scale(self) -> BlurScale {
         match self.amalfi() {
-            // σ 10 pt, refraction included in what the test compares. Menus, popovers, panels,
-            // tooltips and sheets (no sharp share): 1× f4 (f8 would take σ 10 px under the
-            // 1.5 px floor of a reduced blur) 0.39 / 2, 1.5× f8 0.42 / 2, 2× f8 0.30 / 2; the
-            // modules (sharp 0.04): 1× f4 0.36 / 2, 1.5× f8 0.45 / 2, 2× f8 0.46 / 2.
-            Amalfi::Thick => BlurScale {
-                below_2x: 8,
-                from_2x: 8,
-            },
-            // σ 6 pt. The Dock, controls and banners: 1× f2 0.26–0.40 / 2 (σ 6 px: f4 would
-            // take it under the 1.5 px floor), 1.5× f2 0.18–0.30 / 2 (f4 0.36–0.51 / 2–3), 2×
-            // f4 0.18–0.37 / 2. Below 2× the factor stays at 2, a level within the limit.
+            // σ 8 pt. Half below 2× (σ 8 px: f4 would take it near the 1.5 px floor of a
+            // reduced blur), a quarter from 2×: the factors of σ 6 pt, which the larger σ only
+            // makes safer.
             Amalfi::Regular => BlurScale {
                 below_2x: 2,
                 from_2x: 4,
@@ -679,15 +643,14 @@ mod tests {
     #[test]
     fn each_kind_uses_its_amalfi_material() {
         use GlassKind::*;
-        // "Where each material goes" (materials.md): what you read from is thick, light objects
-        // close to content are regular.
+        // Glass/Regular is the one glass of every kind.
         let table = [
-            (Menu, Amalfi::Thick),
-            (Popover, Amalfi::Thick),
-            (Panel, Amalfi::Thick),
-            (Module, Amalfi::Thick),
-            (Tooltip, Amalfi::Thick),
-            (Sheet, Amalfi::Thick),
+            (Menu, Amalfi::Regular),
+            (Popover, Amalfi::Regular),
+            (Panel, Amalfi::Regular),
+            (Module, Amalfi::Regular),
+            (Tooltip, Amalfi::Regular),
+            (Sheet, Amalfi::Regular),
             (Dock, Amalfi::Regular),
             (Control, Amalfi::Regular),
             (Banner, Amalfi::Regular),
@@ -705,7 +668,7 @@ mod tests {
                 assert_eq!(p.rim_light, spec.rim_light, "{kind:?}");
                 assert_eq!(p.shadow, spec.shadow, "{kind:?}");
                 assert_eq!(p.fallback, spec.fallback, "{kind:?}");
-                // Glass/Regular and Glass/Thick refract at their edge (a lens with the
+                // Glass/Regular refracts at its edge (a lens with the
                 // material's distortion); the material's color transfer is neutral.
                 assert_eq!(p.refraction, 1.0, "{kind:?}");
                 assert_eq!(p.depth, spec.refraction.depth, "{kind:?}");
@@ -744,54 +707,26 @@ mod tests {
     fn glass_regular_is_the_token() {
         for dark in [false, true] {
             let m = Amalfi::Regular.material(dark);
-            assert_eq!(m.sigma, 6.0);
+            assert_eq!(m.sigma, 8.0);
             assert_eq!(m.saturation, 1.1);
-            assert_eq!(m.brightness, if dark { 1.10 } else { 1.25 });
+            assert_eq!(m.brightness, if dark { 1.07 } else { 1.18 });
             assert_eq!(
                 m.refraction,
                 Refraction {
-                    distortion: 0.30,
-                    depth: 0.35,
-                    chromatic: 0.03
+                    distortion: 0.26,
+                    depth: 0.32,
+                    chromatic: 0.022
                 }
             );
             let tint = if dark {
-                [42.0 / 255.0, 43.0 / 255.0, 48.0 / 255.0, 0.6]
+                [42.0 / 255.0, 43.0 / 255.0, 48.0 / 255.0, 150.0 / 255.0]
             } else {
-                [1.0, 1.0, 1.0, 0.6]
+                [1.0, 1.0, 1.0, 128.0 / 255.0]
             };
             assert!(close_rgba(m.tint, tint), "{dark}: {:?}", m.tint);
-            // shadows.2: y 4, blur 12 (σ 6), black 12 % in light, 32 % in dark.
-            assert!(close(m.shadow.opacity, if dark { 0.3216 } else { 0.1216 }));
-            assert_eq!((m.shadow.offset_y, m.shadow.sigma), (4.0, 6.0));
-        }
-    }
-
-    #[test]
-    fn glass_thick_is_the_token() {
-        for dark in [false, true] {
-            let m = Amalfi::Thick.material(dark);
-            assert_eq!(m.sigma, 10.0);
-            assert_eq!(m.saturation, 1.1);
-            assert_eq!(m.brightness, if dark { 1.05 } else { 1.12 });
-            assert_eq!(
-                m.refraction,
-                Refraction {
-                    distortion: 0.22,
-                    depth: 0.28,
-                    chromatic: 0.015
-                }
-            );
-            let tint = if dark {
-                [42.0 / 255.0, 43.0 / 255.0, 48.0 / 255.0, 148.0 / 255.0]
-            } else {
-                [1.0, 1.0, 1.0, 148.0 / 255.0]
-            };
-            assert!(close_rgba(m.tint, tint), "{dark}: {:?}", m.tint);
-            assert!((m.tint[3] - 0.58).abs() < 0.002);
-            // shadows.3: y 12, blur 32 (σ 16), black 18 % in light, 36 % in dark.
-            assert!(close(m.shadow.opacity, if dark { 0.3608 } else { 0.1804 }));
-            assert_eq!((m.shadow.offset_y, m.shadow.sigma), (12.0, 16.0));
+            // shadows.glass: y 8, blur 20 (σ 10), black 16 % in light, 35 % in dark.
+            assert!(close(m.shadow.opacity, if dark { 0.3451 } else { 0.1608 }));
+            assert_eq!((m.shadow.offset_y, m.shadow.sigma), (8.0, 10.0));
         }
     }
 
@@ -835,22 +770,17 @@ mod tests {
 
     #[test]
     fn dark_shadows_are_about_twice_as_dense() {
-        for material in [Amalfi::Regular, Amalfi::Thick] {
-            let ratio =
-                material.material(true).shadow.opacity / material.material(false).shadow.opacity;
-            assert!((1.9..=2.7).contains(&ratio), "{material:?}: {ratio}");
-        }
-        // Thick glass floats higher than regular glass.
-        let regular = Amalfi::Regular.material(false).shadow;
-        let thick = Amalfi::Thick.material(false).shadow;
-        assert!(thick.offset_y > regular.offset_y && thick.sigma > regular.sigma);
-        assert!((thick.reach() - (3.0 * 16.0 + 12.0)).abs() < 1e-4);
+        let m = Amalfi::Regular;
+        let ratio = m.material(true).shadow.opacity / m.material(false).shadow.opacity;
+        assert!((1.9..=2.7).contains(&ratio), "{ratio}");
+        let regular = m.material(false).shadow;
+        assert!((regular.reach() - (3.0 * 10.0 + 8.0)).abs() < 1e-4);
     }
 
     #[test]
     fn saturation_and_tint_follow_the_render_order() {
         // Over the reference gray (nearly neutral) the saturation barely moves the color; the
-        // tint then covers it: 60 % white on regular glass, 58 % on thick.
+        // tint then covers it: 50 % white in light, 59 % of #2A2B30 in dark, on every kind.
         let level = |kind: GlassKind, dark: bool| {
             let m = kind.material(dark);
             let [r, g, b] = profile_color(&kind.profile(dark), m.transfer(REFERENCE_GRAY));
@@ -861,15 +791,21 @@ mod tests {
         let saturated =
             |brightness: f32| gray.map(|c| ((l + (c - l) * 1.1) * brightness).min(255.0));
         for (kind, dark, tint, amount, brightness) in [
-            (GlassKind::Dock, false, [255.0; 3], 0.6, 1.25),
-            (GlassKind::Menu, false, [255.0; 3], 148.0 / 255.0, 1.12),
-            (GlassKind::Dock, true, [42.0, 43.0, 48.0], 0.6, 1.10),
+            (GlassKind::Dock, false, [255.0; 3], 128.0 / 255.0, 1.18),
+            (GlassKind::Menu, false, [255.0; 3], 128.0 / 255.0, 1.18),
+            (
+                GlassKind::Dock,
+                true,
+                [42.0, 43.0, 48.0],
+                150.0 / 255.0,
+                1.07,
+            ),
             (
                 GlassKind::Menu,
                 true,
                 [42.0, 43.0, 48.0],
-                148.0 / 255.0,
-                1.05,
+                150.0 / 255.0,
+                1.07,
             ),
         ] {
             let got = level(kind, dark);
@@ -900,19 +836,19 @@ mod tests {
             regular_light.iter().all(|c| close(*c, 1.0)),
             "{regular_light:?}"
         );
-        let thick_dark = fallback_color(&GlassKind::Menu.profile(true));
-        let a = 148.0 / 255.0;
+        let menu_dark = fallback_color(&GlassKind::Menu.profile(true));
+        let a = 150.0 / 255.0;
         let want = [
             (27.0 * (1.0 - a) + 42.0 * a) / 255.0,
             (28.0 * (1.0 - a) + 43.0 * a) / 255.0,
             (31.0 * (1.0 - a) + 48.0 * a) / 255.0,
         ];
         assert!(
-            thick_dark.iter().zip(want).all(|(g, w)| close(*g, w)),
-            "{thick_dark:?}"
+            menu_dark.iter().zip(want).all(|(g, w)| close(*g, w)),
+            "{menu_dark:?}"
         );
         let regular_dark = fallback_color(&GlassKind::Banner.profile(true));
-        assert!((regular_dark[0] * 255.0 - (27.0 * 0.4 + 42.0 * 0.6)).abs() < 0.01);
+        assert!((regular_dark[0] * 255.0 - (27.0 * (1.0 - a) + 42.0 * a)).abs() < 0.01);
         for kind in GlassKind::ALL {
             for dark in [false, true] {
                 let p = kind.profile(dark);
@@ -940,16 +876,11 @@ mod tests {
 
     #[test]
     fn each_material_blurs_at_its_validated_scale() {
-        // The factors of the equivalence test (#204): thick glass at an eighth, regular glass
-        // at half below 2× and a quarter from 2×.
+        // The factors of the equivalence test (#204): half below 2× and a quarter from 2×.
         for kind in GlassKind::ALL {
             for dark in [false, true] {
                 let scale = kind.profile(dark).blur_scale;
-                let want = match kind.amalfi() {
-                    Amalfi::Thick => (8, 8),
-                    _ => (2, 4),
-                };
-                assert_eq!((scale.factor(1.0), scale.factor(2.0)), want, "{kind:?}");
+                assert_eq!((scale.factor(1.0), scale.factor(2.0)), (2, 4), "{kind:?}");
             }
         }
     }
