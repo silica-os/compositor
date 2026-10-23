@@ -1,0 +1,17 @@
+[package]
+name = "compositor-raster"
+description = "the compositor's CPU renderer: smithay's renderer traits on premultiplied BGRA8, SIMD kernels, frames drawn in bands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+fearless_simd = "0.7"
+rayon = "1.12"
+smithay = { version = "0.7", default-features = false, features = ["wayland_frontend"] }
+tracing = "0.1"
+
+[lints]
+workspace = true
