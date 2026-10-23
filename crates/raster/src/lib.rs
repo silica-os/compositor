@@ -349,6 +349,19 @@ impl CpuRenderer {
         exec::rows(self.pool.as_ref(), data, width, f);
     }
 
+    /// `rows` for work of tens of nanoseconds per item (a shader run per pixel): on the
+    /// workers in bands of two rows, as soon as there is more than one.
+    pub fn rows_costly<T: Send>(
+        &self,
+        data: &mut [T],
+        width: usize,
+        f: impl Fn(usize, &mut [T]) + Sync,
+    ) {
+        const ROWS: usize = 2;
+        let band = (ROWS * width) as u64;
+        exec::rows_from(self.pool.as_ref(), data, width, (band + 1, ROWS), f);
+    }
+
     /// The threads a large frame runs on.
     pub fn threads(&self) -> usize {
         self.pool

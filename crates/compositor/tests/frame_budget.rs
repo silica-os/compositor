@@ -251,14 +251,26 @@ fn frame_budget() {
         frames()
     );
     println!(
-        "{:<9} {:>6} {:>7} {:>7} {:>7} {:>7} | p99 {:>6} {:>6} {:>6} {:>6}",
-        "scenario", "frames", "p50", "p95", "p99", "max", "build", "draw", "submit", "gpu"
+        "{:<9} {:>6} {:>7} {:>7} {:>7} {:>7} | p99 {:>6} {:>6} {:>6} {:>6} | glass {:>6} {:>6} {:>6}",
+        "scenario",
+        "frames",
+        "p50",
+        "p95",
+        "p99",
+        "max",
+        "build",
+        "draw",
+        "submit",
+        "gpu",
+        "bdrop",
+        "blur",
+        "matrl"
     );
     for (name, drive) in scenarios {
         let times = scene.measure(drive);
         let stage = |s| stage_p99(&times, s).map_or("-".to_owned(), |v| format!("{v:.3}"));
         println!(
-            "{:<9} {:>6} {:>7.3} {:>7.3} {:>7.3} {:>7.3} |     {:>6} {:>6} {:>6} {:>6}",
+            "{:<9} {:>6} {:>7.3} {:>7.3} {:>7.3} {:>7.3} |     {:>6} {:>6} {:>6} {:>6} |       {:>6} {:>6} {:>6}",
             name,
             times.frames,
             times.p50_ms,
@@ -269,6 +281,9 @@ fn frame_budget() {
             stage("draw"),
             stage("submit"),
             stage("gpu"),
+            stage("glass.backdrop"),
+            stage("glass.blur"),
+            stage("glass.material"),
         );
         assert!(times.frames > 0, "{name}: no frame drawn");
         let over = match renderer.as_str() {

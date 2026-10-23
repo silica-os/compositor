@@ -233,6 +233,7 @@ impl State {
         );
         let mut stages = RenderStages {
             build: now.elapsed(),
+            glass: compositor_render::glass::take_times(),
             ..Default::default()
         };
         let drawn = match draw_headless(renderer, frames, &self.output, &elements, clear) {

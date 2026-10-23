@@ -63,7 +63,8 @@ impl Uniforms<'_> {
 /// A premultiplied pixel as RGBA in 0–1.
 #[inline]
 pub(crate) fn unpack(p: u32) -> [f32; 4] {
-    let c = |shift: u32| ((p >> shift) & 0xff) as f32 / 255.0;
+    // A product, not a division: four divisions per texel were most of a material's cost.
+    let c = |shift: u32| ((p >> shift) & 0xff) as f32 * (1.0 / 255.0);
     [c(16), c(8), c(0), c(24)]
 }
 
@@ -104,17 +105,27 @@ pub(crate) fn length(x: f32, y: f32) -> f32 {
 /// GLSL `texture2D` with `LINEAR` filtering at `(u, v)` texel coordinates (texel centres at
 /// .5), clamped to the edge: premultiplied RGBA in 0–1.
 pub(crate) fn bilinear(image: &Image, u: f32, v: f32) -> [f32; 4] {
-    let (w, h) = (image.width() as i32, image.height() as i32);
+    let (w, h) = (image.width(), image.height());
     if w == 0 || h == 0 {
         return [0.0; 4];
     }
     let (x, y) = (u - 0.5, v - 0.5);
     let (x0, y0) = (x.floor(), y.floor());
     let (fx, fy) = (x - x0, y - y0);
-    let (x0, y0) = (x0 as i32, y0 as i32);
-    let at = |x: i32, y: i32| unpack(image.pixel(x.clamp(0, w - 1), y.clamp(0, h - 1)));
-    let (a, b) = (at(x0, y0), at(x0 + 1, y0));
-    let (c, d) = (at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+    // `as usize` takes what lies before the first texel (and NaN) to it.
+    let (x1, y1) = (
+        ((x0 + 1.0) as usize).min(w - 1),
+        ((y0 + 1.0) as usize).min(h - 1),
+    );
+    let (x0, y0) = ((x0 as usize).min(w - 1), (y0 as usize).min(h - 1));
+    let pixels = image.pixels();
+    let at = |x: usize, y: usize| unpack(pixels.get(y * w + x).copied().unwrap_or(0));
+    // On a texel centre: that texel, as the weights below would give it.
+    if fx == 0.0 && fy == 0.0 {
+        return at(x0, y0);
+    }
+    let (a, b) = (at(x0, y0), at(x1, y0));
+    let (c, d) = (at(x0, y1), at(x1, y1));
     let top = zip_with(a, b, |a, b| mix(a, b, fx));
     let bottom = zip_with(c, d, |c, d| mix(c, d, fx));
     zip_with(top, bottom, |t, b| mix(t, b, fy))

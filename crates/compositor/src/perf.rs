@@ -53,6 +53,8 @@ pub struct RenderStages {
     pub draw: Duration,
     /// Handing the frame to the display: copies, fences, the page flip.
     pub submit: Duration,
+    /// The glass's share of `build`.
+    pub glass: compositor_render::glass::GlassTimes,
 }
 
 impl RenderStages {
@@ -183,6 +185,18 @@ impl Perf {
             stage("build", self.renders.iter().map(|r| r.build).collect()),
             stage("draw", self.renders.iter().map(|r| r.draw).collect()),
             stage("submit", self.renders.iter().map(|r| r.submit).collect()),
+            stage(
+                "glass.backdrop",
+                self.renders.iter().map(|r| r.glass.backdrop).collect(),
+            ),
+            stage(
+                "glass.blur",
+                self.renders.iter().map(|r| r.glass.blur).collect(),
+            ),
+            stage(
+                "glass.material",
+                self.renders.iter().map(|r| r.glass.material).collect(),
+            ),
         ];
         if !self.gpu.is_empty() {
             stages.push(stage("gpu", self.gpu.iter().copied().collect()));

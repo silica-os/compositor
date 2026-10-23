@@ -228,7 +228,13 @@ impl<K: PartialEq + Copy> ShaderCache<K> {
     ) -> ShaderElement {
         let mut state = self.state.borrow_mut();
         match state.as_mut() {
-            Some(cached) if cached.area == area && cached.key == key => cached.element.clone(),
+            Some(cached) if cached.area.size == area.size && cached.key == key => {
+                // Moved: the same pixels at another place, which the damage tracker sees in
+                // the geometry. Nothing is painted again.
+                cached.area.loc = area.loc;
+                cached.element.area.loc = area.loc;
+                cached.element.clone()
+            }
             Some(cached) => {
                 cached.element.resize(area);
                 cached.element.update_uniforms(uniforms());

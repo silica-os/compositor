@@ -1421,6 +1421,7 @@ impl State {
         );
         let mut stages = crate::perf::RenderStages {
             build: now.elapsed(),
+            glass: compositor_render::glass::take_times(),
             ..Default::default()
         };
         let mut drawn = false;

@@ -5,7 +5,7 @@
 use compositor_raster::{CpuRenderer, Image};
 use smithay::backend::renderer::gles::Uniform;
 
-use super::{Uniforms, bilinear, clamp01, length, mix, mix3, pack, zip_with};
+use super::{Uniforms, clamp01, length, mix, mix3, pack, unpack, zip_with};
 
 /// How many regions a group holds (`MAX_SHAPES`).
 const SHAPES: usize = 8;
@@ -493,72 +493,136 @@ impl Material {
         texel
     }
 
-    /// The pixel over the backdrop `tex` (premultiplied RGBA, alpha 1).
-    fn color(&self, texel: &Texel, tex: &Image) -> [f32; 4] {
-        if texel.coverage <= 0.0 {
-            // Outside the shape: the outline and the shadow, black.
-            let a = texel.outline;
-            return [0.0, 0.0, 0.0, a + texel.shadow * (1.0 - a)];
-        }
+    /// Whether the red and blue channels sample apart from green.
+    fn splits(&self) -> bool {
+        self.chromatic > 0.0 && self.refraction > 0.0
+    }
+
+    /// The pixels of `run` (`material.frag` from the backdrop sample on), the first `out.len()`
+    /// of them. Outside the shape the coverage is 0 and the backdrop black, which leaves the
+    /// outline and the shadow, black: one formula for every pixel, with no branch, so that
+    /// the loop vectorizes.
+    fn shade(&self, run: &Run, out: &mut [u32]) {
         let opaque = self.fallback[3] > 0.5;
-        let background = if opaque {
-            [self.fallback[0], self.fallback[1], self.fallback[2]]
-        } else if self.chromatic > 0.0 && self.refraction > 0.0 {
-            let [x, y] = texel.sample;
-            let [r, ..] = bilinear(tex, x + texel.split[0], y + texel.split[1]);
-            let [_, g, ..] = bilinear(tex, x, y);
-            let [_, _, b, _] = bilinear(tex, x - texel.split[0], y - texel.split[1]);
-            [r, g, b]
-        } else {
-            let [r, g, b, _] = bilinear(tex, texel.sample[0], texel.sample[1]);
-            [r, g, b]
-        };
-        let mut color = self.offset;
-        for (o, row) in color.iter_mut().zip(self.rows) {
-            *o += dot3(row, background);
-        }
-        let luminance = (background[0] + background[1] + background[2]) / 3.0;
-        let curve = zip_with(self.curve2, self.curve3, |q2, q3| {
-            (q2 + q3 * luminance) * luminance * luminance
-        });
-        color = zip_with(color, curve, |c, q| c + q);
-        let rec709 = dot3(color, [0.2126, 0.7152, 0.0722]);
-        color = mix3(
-            [rec709; 3],
-            color,
-            if opaque { 1.0 } else { self.saturation },
-        );
-        if !opaque {
-            color = color.map(|c| clamp01(c * self.brightness));
-        }
+        let saturation = if opaque { 1.0 } else { self.saturation };
+        let brightness = if opaque { None } else { Some(self.brightness) };
         let tint = [self.tint[0], self.tint[1], self.tint[2]];
-        color = mix3(color, tint, self.tint[3]);
-        if self.edge_on {
-            let offset_in = texel.offset_in;
-            if offset_in > 0.0 {
-                let room = (1.0 - self.fill_gray).max(0.05);
-                color = color.map(|c| c + offset_in * ((1.0 - c) / room).min(1.0));
-            } else {
-                let k = 1.0 + offset_in / self.fill_gray.max(0.05);
-                color = color.map(|c| c * k);
-            }
-        }
         let rim = [self.inside_rim[0], self.inside_rim[1], self.inside_rim[2]];
-        color = mix3(color, rim, self.inside_rim[3] * texel.in_band);
-        if self.rim_light[3] > 0.0 {
-            let light = [self.rim_light[0], self.rim_light[1], self.rim_light[2]];
-            color = mix3(color, light, self.rim_light[3] * texel.lit);
+        let light = [self.rim_light[0], self.rim_light[1], self.rim_light[2]];
+        let room = (1.0 - self.fill_gray).max(0.05);
+        let fill = self.fill_gray.max(0.05);
+        let mut pixels = [0u32; RUN];
+        for (i, pixel) in pixels.iter_mut().enumerate() {
+            let lane = |values: &[f32; RUN]| values.get(i).copied().unwrap_or(0.0);
+            let background = [lane(&run.r), lane(&run.g), lane(&run.b)];
+            let mut color = self.offset;
+            for (o, row) in color.iter_mut().zip(self.rows) {
+                *o += dot3(row, background);
+            }
+            let luminance = (background[0] + background[1] + background[2]) / 3.0;
+            for ((c, q2), q3) in color.iter_mut().zip(self.curve2).zip(self.curve3) {
+                *c += (q2 + q3 * luminance) * luminance * luminance;
+            }
+            let rec709 = dot3(color, [0.2126, 0.7152, 0.0722]);
+            color = mix3([rec709; 3], color, saturation);
+            if let Some(brightness) = brightness {
+                color = color.map(|c| clamp01(c * brightness));
+            }
+            color = mix3(color, tint, self.tint[3]);
+            if self.edge_on {
+                let offset_in = lane(&run.offset_in);
+                let k = 1.0 + offset_in / fill;
+                color = color.map(|c| {
+                    let lighter = c + offset_in * ((1.0 - c) / room).min(1.0);
+                    if offset_in > 0.0 { lighter } else { c * k }
+                });
+            }
+            color = mix3(color, rim, self.inside_rim[3] * lane(&run.in_band));
+            if self.rim_light[3] > 0.0 {
+                color = mix3(color, light, self.rim_light[3] * lane(&run.lit));
+            }
+            let coverage = lane(&run.coverage);
+            let [r, g, b] = color.map(|c| clamp01(c) * coverage);
+            let a = coverage + lane(&run.outline) * (1.0 - coverage);
+            *pixel = pack([r, g, b, a + lane(&run.shadow) * (1.0 - a)]);
         }
-        let color = color.map(clamp01);
-        let coverage = texel.coverage;
-        let mut result = [
-            color[0] * coverage,
-            color[1] * coverage,
-            color[2] * coverage,
-            coverage + texel.outline * (1.0 - coverage),
-        ];
-        result[3] += texel.shadow * (1.0 - result[3]);
-        result
+        for (o, p) in out.iter_mut().zip(pixels) {
+            *o = p;
+        }
+    }
+}
+
+/// Pixels shaded at once: long enough for the vector units, short enough to stay in
+/// registers and L1.
+const RUN: usize = 16;
+
+/// A run of pixels: the backdrop sampled, and the geometry of each.
+#[derive(Default)]
+struct Run {
+    r: [f32; RUN],
+    g: [f32; RUN],
+    b: [f32; RUN],
+    coverage: [f32; RUN],
+    outline: [f32; RUN],
+    offset_in: [f32; RUN],
+    in_band: [f32; RUN],
+    lit: [f32; RUN],
+    shadow: [f32; RUN],
+}
+
+/// Where a pixel reads the backdrop: `bilinear` at a point, as the texel there, the steps to
+/// the next texel across and down (0 at the edge) and the weights of those.
+#[derive(Debug, Clone, Copy, Default)]
+struct Tap {
+    index: u32,
+    across: u32,
+    down: u32,
+    fx: f32,
+    fy: f32,
+}
+
+impl Tap {
+    /// `bilinear` at `(u, v)`, texel coordinates of a `w` × `h` texture.
+    fn new([u, v]: Vec2, (w, h): (usize, usize)) -> Self {
+        let (Some(right), Some(bottom)) = (w.checked_sub(1), h.checked_sub(1)) else {
+            return Self::default();
+        };
+        let (x, y) = (u - 0.5, v - 0.5);
+        let (x0, y0) = (x.floor(), y.floor());
+        // `as usize` takes what lies before the first texel (and NaN) to it.
+        let (x1, y1) = (
+            ((x0 + 1.0) as usize).min(right),
+            ((y0 + 1.0) as usize).min(bottom),
+        );
+        let (fx, fy) = (x - x0, y - y0);
+        let (x0, y0) = ((x0 as usize).min(right), (y0 as usize).min(bottom));
+        let narrow = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+        Self {
+            index: narrow(y0 * w + x0),
+            across: narrow(x1 - x0),
+            down: narrow((y1 - y0) * w),
+            fx,
+            fy,
+        }
+    }
+
+    /// The backdrop there, premultiplied RGBA in 0–1: `bilinear` read through the steps.
+    #[inline]
+    fn read(self, pixels: &[u32]) -> [f32; 4] {
+        let at = |i: u32| unpack(pixels.get(i as usize).copied().unwrap_or(0));
+        let a = at(self.index);
+        if self.fx == 0.0 && self.fy == 0.0 {
+            return a;
+        }
+        let b = at(self.index.saturating_add(self.across));
+        let c = at(self.index.saturating_add(self.down));
+        let d = at(self
+            .index
+            .saturating_add(self.down)
+            .saturating_add(self.across));
+        let top = zip_with(a, b, |a, b| mix(a, b, self.fx));
+        let bottom = zip_with(c, d, |c, d| mix(c, d, self.fx));
+        zip_with(top, bottom, |t, b| mix(t, b, self.fy))
     }
 }
 
@@ -567,44 +631,130 @@ impl Material {
 pub(crate) struct Plan {
     material: Material,
     width: usize,
+    /// The size of the texture the taps read.
+    tex_size: (usize, usize),
     texels: Vec<Texel>,
+    /// Where each pixel reads the backdrop (green, or all three channels)…
+    taps: Vec<Tap>,
+    /// …and red and blue where they read apart, in pixel order, from `split_rows[y]` on in row
+    /// `y`.
+    split_taps: Vec<[Tap; 2]>,
+    split_rows: Vec<usize>,
 }
 
 impl Plan {
-    /// The geometry of the `size` pixels at `origin` of the material's texture.
+    /// The geometry of the `size` pixels at `origin` of the material's texture, which is
+    /// `tex_size` large.
     pub fn new(
         renderer: &CpuRenderer,
         material: Material,
         origin: [i32; 2],
         size: (usize, usize),
+        tex_size: (usize, usize),
     ) -> Self {
         let mut texels = vec![Texel::default(); size.0.saturating_mul(size.1)];
-        renderer.rows(&mut texels, size.0, |y, row| {
+        renderer.rows_costly(&mut texels, size.0, |y, row| {
             let py = (origin[1] as f32) + y as f32 + 0.5;
             for (x, texel) in row.iter_mut().enumerate() {
                 let px = (origin[0] as f32) + x as f32 + 0.5;
                 *texel = material.texel([px, py]);
             }
         });
+        let splits = material.splits();
+        let taps = texels
+            .iter()
+            .map(|t| Tap::new(t.sample, tex_size))
+            .collect();
+        let mut split_taps = Vec::new();
+        let mut split_rows = Vec::with_capacity(size.1);
+        for row in texels.chunks(size.0.max(1)) {
+            split_rows.push(split_taps.len());
+            for texel in row.iter().filter(|t| splits && t.split != [0.0, 0.0]) {
+                let [x, y] = texel.sample;
+                let [dx, dy] = texel.split;
+                split_taps.push([
+                    Tap::new([x + dx, y + dy], tex_size),
+                    Tap::new([x - dx, y - dy], tex_size),
+                ]);
+            }
+        }
         Self {
             material,
             width: size.0,
+            tex_size,
             texels,
+            taps,
+            split_taps,
+            split_rows,
         }
     }
 
-    /// The material over `backdrop` (as large as `tex_size`), at alpha 1.
+    /// The size of the texture the plan reads.
+    pub fn tex_size(&self) -> (usize, usize) {
+        self.tex_size
+    }
+
+    /// The material over `backdrop` (`tex_size` large), at alpha 1.
     pub fn paint(&self, renderer: &CpuRenderer, backdrop: &Image) -> Image {
         let height = self.texels.len().checked_div(self.width).unwrap_or(0);
         let mut out = Image::new(self.width, height);
         let width = self.width;
-        renderer.rows(out.pixels_mut(), width, |y, row| {
-            let texels = self
-                .texels
-                .get(y * width..(y + 1) * width)
-                .unwrap_or_default();
-            for (p, texel) in row.iter_mut().zip(texels) {
-                *p = pack(self.material.color(texel, backdrop));
+        let material = &self.material;
+        let fallback = (material.fallback[3] > 0.5).then_some([
+            material.fallback[0],
+            material.fallback[1],
+            material.fallback[2],
+        ]);
+        let splits = material.splits();
+        // A backdrop of another size than the taps were made for reads nothing.
+        let pixels = if (backdrop.width(), backdrop.height()) == self.tex_size {
+            backdrop.pixels()
+        } else {
+            &[]
+        };
+        renderer.rows_costly(out.pixels_mut(), width, |y, row| {
+            let span = y * width..(y + 1) * width;
+            let texels = self.texels.get(span.clone()).unwrap_or_default();
+            let taps = self.taps.get(span).unwrap_or_default();
+            let first = self.split_rows.get(y).copied().unwrap_or(usize::MAX);
+            let mut split_taps = self.split_taps.get(first..).unwrap_or_default().iter();
+            let mut run = Run::default();
+            for (out, (texels, taps)) in row
+                .chunks_mut(RUN)
+                .zip(texels.chunks(RUN).zip(taps.chunks(RUN)))
+            {
+                for (i, (texel, tap)) in texels.iter().zip(taps).enumerate() {
+                    let split = splits && texel.split != [0.0, 0.0];
+                    let side = if split { split_taps.next() } else { None };
+                    let [r, g, b] = match (texel.coverage > 0.0, fallback, side) {
+                        (false, ..) => [0.0; 3],
+                        (true, Some(color), _) => color,
+                        (true, None, Some([red, blue])) => [
+                            red.read(pixels)[0],
+                            tap.read(pixels)[1],
+                            blue.read(pixels)[2],
+                        ],
+                        (true, None, None) => {
+                            let [r, g, b, _] = tap.read(pixels);
+                            [r, g, b]
+                        }
+                    };
+                    let set = |lane: &mut [f32; RUN], value: f32| {
+                        if let Some(lane) = lane.get_mut(i) {
+                            *lane = value;
+                        }
+                    };
+                    set(&mut run.r, r);
+                    set(&mut run.g, g);
+                    set(&mut run.b, b);
+                    set(&mut run.coverage, texel.coverage);
+                    set(&mut run.outline, texel.outline);
+                    set(&mut run.offset_in, texel.offset_in);
+                    set(&mut run.in_band, texel.in_band);
+                    set(&mut run.lit, texel.lit);
+                    set(&mut run.shadow, texel.shadow);
+                }
+                material.shade(&run, out);
             }
         });
         out

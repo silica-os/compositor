@@ -253,7 +253,7 @@ pub(crate) fn tone(renderer: &CpuRenderer, image: &mut Image, table: &[[f32; 11]
     };
     let width = image.width();
     let scale = scale as f32;
-    renderer.rows(image.pixels_mut(), width, |y, row| {
+    renderer.rows_costly(image.pixels_mut(), width, |y, row| {
         let y = (y as f32 + 0.5) / scale;
         for p in row {
             let [r, g, b, _] = unpack(*p);

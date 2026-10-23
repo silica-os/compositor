@@ -8,7 +8,8 @@
 //! signed distance. The textures are reused while the background does not change. The
 //! materials are `docs/design/amalfi/materials.md` (`glass_profile`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement};
@@ -787,6 +788,41 @@ struct Cached {
     materials: Vec<CpuMaterial>,
 }
 
+/// Where the glass spent its time since the last [`take_times`], on this thread.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GlassTimes {
+    /// The elements behind, drawn offscreen.
+    pub backdrop: Duration,
+    /// The blur of the backdrop.
+    pub blur: Duration,
+    /// The material painted over the blur (the CPU renderer; on the GPU it is drawn with the
+    /// frame).
+    pub material: Duration,
+}
+
+thread_local! {
+    static TIMES: Cell<GlassTimes> = const {
+        Cell::new(GlassTimes {
+            backdrop: Duration::ZERO,
+            blur: Duration::ZERO,
+            material: Duration::ZERO,
+        })
+    };
+}
+
+/// The glass times since the last call, reset.
+pub fn take_times() -> GlassTimes {
+    TIMES.with(Cell::take)
+}
+
+fn add_time(stage: fn(&mut GlassTimes) -> &mut Duration, since: Instant) {
+    TIMES.with(|times| {
+        let mut now = times.get();
+        *stage(&mut now) += since.elapsed();
+        times.set(now);
+    });
+}
+
 /// The material of a group on the CPU: its geometry while the shapes stay, painted over the
 /// blurred texture until that changes.
 struct CpuMaterial {
@@ -809,8 +845,13 @@ fn cpu_material(
     fallback: bool,
     blurred: &CpuTexture,
 ) -> Result<SilicaTexture, SilicaError> {
+    let tex_size = {
+        let image = blurred.read();
+        (image.width(), image.height())
+    };
     let found = cache.iter().position(|m| {
         m.fallback == fallback
+            && m.plan.tex_size() == tex_size
             && m.shapes.len() == shapes.len()
             && m.shapes.iter().zip(shapes).all(|(a, b)| a.same_shape(b))
     });
@@ -823,7 +864,7 @@ fn cpu_material(
             CpuMaterial {
                 shapes: shapes.to_vec(),
                 fallback,
-                plan: Plan::new(renderer, material, [origin.x, origin.y], size),
+                plan: Plan::new(renderer, material, [origin.x, origin.y], size, tex_size),
                 painted: None,
             }
         }
@@ -932,7 +973,10 @@ impl GlassCache {
             }
         }
         if !reuse {
+            let start = Instant::now();
             let sharp = render_to_texture(renderer, behind, bbox, scale, clear_color)?;
+            add_time(|t| &mut t.backdrop, start);
+            let start = Instant::now();
             let mut textures: Vec<(BlurKey, SilicaTexture)> = Vec::new();
             for region in regions {
                 let key = region.blur_key();
@@ -942,6 +986,7 @@ impl GlassCache {
                 let blurred = blur_with(renderer, &sharp, bbox.size, key, scale)?;
                 textures.push((key, blurred));
             }
+            add_time(|t| &mut t.blur, start);
             let count = groups(regions).len();
             // The CPU materials keep their geometry, to be painted over the new textures.
             let kept = |cached: &mut Cached| {
@@ -1018,6 +1063,7 @@ impl GlassCache {
             else {
                 continue;
             };
+            let start = Instant::now();
             let material = match (&*renderer, texture) {
                 (SilicaRenderer::Cpu(cpu), SilicaTexture::Cpu(blurred)) => Some(cpu_material(
                     cpu,
@@ -1031,6 +1077,7 @@ impl GlassCache {
                 )?),
                 _ => None,
             };
+            add_time(|t| &mut t.material, start);
             elements.push(GlassElement {
                 id: id.clone(),
                 commit: cached.commit,

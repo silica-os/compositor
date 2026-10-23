@@ -43,7 +43,7 @@ impl PixelProgram {
     pub fn paint(&self, renderer: &CpuRenderer, size: [f32; 2], src: [f32; 4], image: &mut Image) {
         let (w, h) = (image.width(), image.height());
         let (kx, ky) = (src[2] / w as f32, src[3] / h as f32);
-        renderer.rows(image.pixels_mut(), w, |y, row| {
+        renderer.rows_costly(image.pixels_mut(), w, |y, row| {
             let py = src[1] + (y as f32 + 0.5) * ky;
             for (x, out) in row.iter_mut().enumerate() {
                 *out = pack(self.color([src[0] + (x as f32 + 0.5) * kx, py], size));

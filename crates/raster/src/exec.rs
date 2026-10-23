@@ -311,22 +311,34 @@ pub(crate) fn rows<T: Send>(
     width: usize,
     f: impl Fn(usize, &mut [T]) + Sync,
 ) {
+    rows_from(pool, data, width, (PARALLEL_PIXELS, BAND_ROWS), f);
+}
+
+/// `rows`, on the workers from `parallel` items up, `band` rows at a time.
+pub(crate) fn rows_from<T: Send>(
+    pool: Option<&ThreadPool>,
+    data: &mut [T],
+    width: usize,
+    (parallel, band_rows): (u64, usize),
+    f: impl Fn(usize, &mut [T]) + Sync,
+) {
+    let band_rows = band_rows.max(1);
     if width == 0 {
         return;
     }
     let band = |(i, band): (usize, &mut [T])| {
         for (j, row) in band.chunks_mut(width).enumerate() {
-            f(i * BAND_ROWS + j, row);
+            f(i * band_rows + j, row);
         }
     };
     match pool {
-        Some(pool) if data.len() as u64 >= PARALLEL_PIXELS => pool.install(|| {
-            data.par_chunks_mut(BAND_ROWS * width)
+        Some(pool) if data.len() as u64 >= parallel => pool.install(|| {
+            data.par_chunks_mut(band_rows * width)
                 .enumerate()
                 .for_each(band);
         }),
         _ => data
-            .chunks_mut(BAND_ROWS * width)
+            .chunks_mut(band_rows * width)
             .enumerate()
             .for_each(band),
     }
