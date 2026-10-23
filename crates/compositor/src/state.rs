@@ -161,6 +161,8 @@ pub struct State {
     /// Something happened that may change the screen (a client request, input, a command):
     /// the next frame tick draws even if the output is idle (`State::wake`, drm.rs).
     pub redraw: bool,
+    /// A frame is to be built once the current batch of events is handled (`State::wake`).
+    pub render_scheduled: bool,
     pub idle_slept: bool,
     /// The session is locked (`lock.rs`), the window that had the focus, the lock and screen
     /// saver settings, and since when the saver or the display off began (the password delay
@@ -301,9 +303,18 @@ impl State {
     }
 
     /// Something may have changed the screen: the next frame tick draws (on DRM an output
-    /// with nothing to draw stops building frames until this, see `drm.rs`).
+    /// with nothing to draw stops building frames until this, see `drm.rs`). On DRM that tick
+    /// comes as soon as the events at hand are handled: a client's commit shows on the next
+    /// vblank, not one frame tick later.
     pub fn wake(&mut self) {
         self.redraw = true;
+        if !self.render_scheduled && matches!(self.backend, Backend::Drm(_)) {
+            self.render_scheduled = true;
+            self.loop_handle.insert_idle(|data| {
+                data.state.render_scheduled = false;
+                data.state.drm_tick();
+            });
+        }
     }
 
     /// Whether the compositor itself is animating (not a client): a window closing or minimizing,
@@ -499,6 +510,7 @@ impl State {
             last_input: Instant::now(),
             display_off: false,
             redraw: true,
+            render_scheduled: false,
             idle_slept: false,
             locked: false,
             locked_focus: None,

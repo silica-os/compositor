@@ -18,7 +18,9 @@ use smithay::backend::input::InputEvent;
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::{Bind, ImportMem};
+use smithay::backend::renderer::{
+    Bind, BlitFrame, Frame, ImportMem, Offscreen, Renderer, Texture, TextureFilter,
+};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu};
@@ -30,7 +32,7 @@ use smithay::reexports::drm::control::{Device as ControlDevice, ModeTypeFlags, c
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::Display;
-use smithay::utils::{DeviceFd, Transform};
+use smithay::utils::{Buffer as BufferCoords, DeviceFd, Physical, Rectangle, Size, Transform};
 use tracing::{info, warn};
 
 use crate::backend::Backend;
@@ -47,17 +49,9 @@ const QUIET_TICKS: u32 = 3;
 /// layer placement) shows within this.
 const IDLE_RECHECK: Duration = Duration::from_millis(250);
 
-/// The buffer age the damage tracker is told for a swapchain buffer (silica-os/silica-desktop#233).
-///
-/// With the age the tracker repaints, on a buffer, only the damage of the frames since it was
-/// last drawn. On the dev VM's software GPU the contents of a scanout buffer do not survive
-/// as the age promises, and a partially damaged frame (the lock screen's field, a client that
-/// damages one rectangle: #205) showed the previous state. Age 0 repaints the whole output
-/// from the surface textures on every frame that has damage; the
-/// savings that remain are the idle ticks (#202) and the partial shm uploads (#205).
-fn tracker_age(_swapchain_age: u8) -> usize {
-    0
-}
+/// A queued frame whose vblank has not come after this is taken as lost: clients get their
+/// frame callbacks from the ticks again.
+const FLIP_STALL: Duration = Duration::from_millis(100);
 
 /// What a frame tick knows to decide whether to build a frame.
 #[derive(Debug, Clone, Copy)]
@@ -144,6 +138,8 @@ struct OutputSurface {
     /// The user data of a queued frame: its presentation feedback, given back at vblank.
     gbm: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, Option<OutputPresentationFeedback>>,
     damage_tracker: OutputDamageTracker,
+    /// What the damage tracker draws into, copied into each scanout buffer (`render_surface`).
+    canvas: Option<GlesTexture>,
 }
 
 /// A connected connector with the crtc that can drive it and the mode to use.
@@ -242,8 +238,13 @@ fn display_output(choice: &Choice) -> Output {
     output
 }
 
-/// Renders `elements` into the next buffer of `surface` and queues it; false when nothing
-/// changed.
+/// Renders `elements` into the canvas of `surface` with the damage since the last frame, then
+/// copies the canvas into the next scanout buffer and queues it; false when nothing changed.
+///
+/// The damage tracker draws into the canvas, a texture that keeps its contents from frame to
+/// frame (age 1), so a frame repaints only what changed. The scanout buffers are not trusted
+/// to keep theirs: on the dev VM's software GPU they do not survive as the swapchain age
+/// promises (silica-os/silica-desktop#233), so each one gets the whole canvas, a plain copy.
 fn render_surface(
     renderer: &mut GlesRenderer,
     surface: &mut OutputSurface,
@@ -251,19 +252,33 @@ fn render_surface(
     clear_color: [f32; 4],
     feedback: Option<OutputPresentationFeedback>,
 ) -> Result<bool, String> {
-    let (mut dmabuf, age) = surface
-        .gbm
-        .next_buffer()
-        .map_err(|e| format!("next buffer: {e}"))?;
-    let mut framebuffer = renderer
-        .bind(&mut dmabuf)
-        .map_err(|e| format!("bind: {e}"))?;
+    let (w, h) = surface.mode.size();
+    let size = Size::<i32, BufferCoords>::from((i32::from(w), i32::from(h)));
+    let format = surface.gbm.format();
+    let fresh = surface
+        .canvas
+        .as_ref()
+        .is_none_or(|c| c.size() != size || c.format() != Some(format));
+    if fresh {
+        let canvas: GlesTexture = renderer
+            .create_buffer(format, size)
+            .map_err(|e| format!("canvas: {e}"))?;
+        surface.canvas = Some(canvas);
+    }
+    let Some(canvas) = surface.canvas.as_mut() else {
+        return Err("no canvas".to_string());
+    };
+    // Declared before the canvas is bound: both bindings live as long as the copy's frame.
+    let mut dmabuf;
+    let mut canvas = renderer
+        .bind(canvas)
+        .map_err(|e| format!("bind canvas: {e}"))?;
     let result = surface
         .damage_tracker
         .render_output(
             renderer,
-            &mut framebuffer,
-            tracker_age(age),
+            &mut canvas,
+            usize::from(!fresh),
             elements,
             clear_color,
         )
@@ -271,9 +286,26 @@ fn render_surface(
     let Some(damage) = result.damage.cloned() else {
         return Ok(false);
     };
+    (dmabuf, _) = surface
+        .gbm
+        .next_buffer()
+        .map_err(|e| format!("next buffer: {e}"))?;
+    let mut target = renderer
+        .bind(&mut dmabuf)
+        .map_err(|e| format!("bind: {e}"))?;
+    let whole = Rectangle::from_size(Size::<i32, Physical>::from((size.w, size.h)));
+    let sync = {
+        let mut frame = renderer
+            .render(&mut canvas, whole.size, Transform::Normal)
+            .map_err(|e| format!("copy frame: {e}"))?;
+        frame
+            .blit_to(&mut target, whole, whole, TextureFilter::Nearest)
+            .map_err(|e| format!("copy: {e}"))?;
+        frame.finish().map_err(|e| format!("copy finish: {e}"))?
+    };
     surface
         .gbm
-        .queue_buffer(Some(result.sync), Some(damage), feedback)
+        .queue_buffer(Some(sync), Some(damage), feedback)
         .map_err(|e| format!("queue: {e}"))?;
     Ok(true)
 }
@@ -306,6 +338,7 @@ fn create_surface(
         mode: choice.mode,
         gbm,
         damage_tracker: OutputDamageTracker::from_output(output),
+        canvas: None,
     })
 }
 
@@ -1038,7 +1071,7 @@ impl State {
 
     /// The frame tick: builds a frame only if one may have something to draw (see
     /// [`frame_due`]); an idle output with no event costs nothing.
-    fn drm_tick(&mut self) {
+    pub(crate) fn drm_tick(&mut self) {
         let woken = std::mem::take(&mut self.redraw);
         let animating = self.compositor_animating();
         let dark = self.dark();
@@ -1062,19 +1095,25 @@ impl State {
     pub fn render_drm(&mut self) {
         let now = Instant::now();
         let display_off = self.display_off;
-        let (primary_ready, extras_ready) = self
+        let (primary_ready, extras_ready, flipping) = self
             .drm_backend()
             .filter(|backend| !display_off && backend.session.is_active())
-            .map_or((false, false), |backend| {
+            .map_or((false, false, false), |backend| {
                 (
                     !backend.pending && backend.surface.is_some(),
                     backend.extras.iter().any(|e| !e.pending),
+                    backend.pending && backend.last_frame.elapsed() < FLIP_STALL,
                 )
             });
         if !primary_ready && !extras_ready {
-            // Clients still get their frame callbacks, at the idle rate.
-            self.send_frames();
-            self.signal_frame_barriers();
+            // A frame waits for its vblank, which builds the next one and calls the clients
+            // back then: a callback now would only make them draw a frame nobody sees.
+            // Nothing is drawn at all (display off, session away): they still get their
+            // callbacks, at the tick rate.
+            if !flipping {
+                self.send_frames();
+                self.signal_frame_barriers();
+            }
             return;
         }
         // The same frame preparation as the headless backend.
@@ -1305,7 +1344,7 @@ fn default_cursor(renderer: &mut GlesRenderer) -> Option<GlesTexture> {
 
 #[cfg(test)]
 mod tests {
-    use super::{IDLE_RECHECK, QUIET_TICKS, Tick, frame_due, preferred_mode, tracker_age};
+    use super::{IDLE_RECHECK, QUIET_TICKS, Tick, frame_due, preferred_mode};
     use std::time::Duration;
 
     #[test]
@@ -1353,13 +1392,6 @@ mod tests {
     fn frames_go_on_for_a_few_ticks_after_the_last_damage() {
         for quiet in 0..QUIET_TICKS {
             assert!(frame_due(Tick { quiet, ..idle() }), "{quiet}");
-        }
-    }
-
-    #[test]
-    fn the_tracker_always_repaints_the_whole_output_from_the_textures() {
-        for age in [0, 1, 2, 3, u8::MAX] {
-            assert_eq!(tracker_age(age), 0, "{age}");
         }
     }
 
