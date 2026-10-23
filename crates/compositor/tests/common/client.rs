@@ -768,6 +768,25 @@ impl TestWindow {
         input: Option<(i32, i32, i32, i32)>,
         paint: impl Fn(u32, u32, u32, u32) -> [u8; 4],
     ) -> Self {
+        let all = zwlr_layer_surface_v1::Anchor::Top
+            | zwlr_layer_surface_v1::Anchor::Bottom
+            | zwlr_layer_surface_v1::Anchor::Left
+            | zwlr_layer_surface_v1::Anchor::Right;
+        Self::open_layer_at(socket, level, namespace, all, (0, 0), input, paint)
+    }
+
+    /// Like `open_layer`, anchored to `anchor` with `size` (0 stretches between the anchors),
+    /// as a bar or a dock.
+    #[allow(dead_code)]
+    pub fn open_layer_at(
+        socket: &Path,
+        level: zwlr_layer_shell_v1::Layer,
+        namespace: &str,
+        anchor: zwlr_layer_surface_v1::Anchor,
+        size: (u32, u32),
+        input: Option<(i32, i32, i32, i32)>,
+        paint: impl Fn(u32, u32, u32, u32) -> [u8; 4],
+    ) -> Self {
         let conn = Connection::from_socket(UnixStream::connect(socket).unwrap()).unwrap();
         let mut queue = conn.new_event_queue();
         let qh = queue.handle();
@@ -782,12 +801,8 @@ impl TestWindow {
             .clone()
             .expect("zwlr_layer_shell_v1 missing")
             .get_layer_surface(&surface, None, level, namespace.to_owned(), &qh, ());
-        layer.set_anchor(
-            zwlr_layer_surface_v1::Anchor::Top
-                | zwlr_layer_surface_v1::Anchor::Bottom
-                | zwlr_layer_surface_v1::Anchor::Left
-                | zwlr_layer_surface_v1::Anchor::Right,
-        );
+        layer.set_anchor(anchor);
+        layer.set_size(size.0, size.1);
         layer.set_exclusive_zone(-1);
         surface.commit();
         while app.layer_size.is_none() {
@@ -1092,6 +1107,25 @@ impl TestWindow {
             std::thread::sleep(every);
             self.surface.attach(Some(&self.buffer), 0, 0);
             self.surface.damage_buffer(0, 0, w as i32, h as i32);
+            self.surface.commit();
+            self.queue.flush().unwrap();
+        }
+        self.queue.roundtrip(&mut self.app).unwrap();
+    }
+
+    /// Recommits the same buffer `count` times, every `every`, damaging only `(x, y, w, h)`: a
+    /// spinner's frames.
+    #[allow(dead_code)]
+    pub fn commit_damaged(
+        &mut self,
+        count: u32,
+        every: std::time::Duration,
+        (x, y, w, h): (i32, i32, i32, i32),
+    ) {
+        for _ in 0..count {
+            std::thread::sleep(every);
+            self.surface.attach(Some(&self.buffer), 0, 0);
+            self.surface.damage_buffer(x, y, w, h);
             self.surface.commit();
             self.queue.flush().unwrap();
         }

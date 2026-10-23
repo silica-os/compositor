@@ -93,7 +93,7 @@ parameter schemas. Every catalog id is run by the compositor (test
 | `output.color_temperature` | `kelvin` (1000–6500) | `kelvin`, `applied`: the night light on every display through the CRTC gamma ramp (6500 is neutral; `applied` false where there is no gamma: nested, headless, some virtual GPUs). silica-daemon drives it with the schedule |
 | `keyboard.next_source` | — | `switched`, `active`: the next input source (⌃Space; with a single source the shortcut goes to the app) |
 | `keyboard.select_source` | `index` (0–3) | `switched`, `active`: makes that input source the active one (the input menu of the menu bar and the lock screen); `false` with fewer than two sources or past the last |
-| `perf.render` | `reset?` | The compositor's rendering (drm backend): `frames`, `mean_ms`, `p50_ms`, `p95_ms`, `p99_ms`, `max_ms` |
+| `perf.render` | `reset?` | The compositor's rendering per drawn frame (drm backend, headless with `SILICA_COMPOSITOR_HEADLESS_FRAMES=1`): `frames`, `mean_ms`, `p50_ms`, `p95_ms`, `p99_ms`, `max_ms`, and `stages` (`build`, `draw`, `submit`, `gpu`: `frames` and percentiles) |
 
 The `perf.frames` measurements are the compositor's, the same for every toolkit: a frame is
 a commit with a new buffer, the interval is the time between two frames of the same

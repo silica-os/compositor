@@ -3,13 +3,14 @@
 //! The arrow is only the fallback when the XCursor theme (Adwaita by default, see
 //! `cursor_theme.rs`) is missing.
 
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::{Renderer, Texture};
+use smithay::backend::renderer::{ImportMem, Renderer, Texture};
 use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
 use smithay::utils::{Logical, Point, Transform};
 use smithay::wayland::compositor::with_states;
@@ -58,6 +59,18 @@ pub fn arrow() -> (i32, i32, Vec<u8>) {
         i32::try_from(ARROW.len()).unwrap_or(0),
         pixels,
     )
+}
+
+/// The default cursor as a texture, generated in code ([`arrow`]).
+pub fn default_texture(renderer: &mut GlesRenderer) -> Option<GlesTexture> {
+    let (w, h, pixels) = arrow();
+    match renderer.import_memory(&pixels, Fourcc::Abgr8888, (w, h).into(), false) {
+        Ok(texture) => Some(texture),
+        Err(err) => {
+            tracing::warn!("default cursor: {err}");
+            None
+        }
+    }
 }
 
 /// The elements of the pointer at `location` (logical, relative to the output), in front.

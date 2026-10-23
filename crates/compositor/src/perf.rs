@@ -34,8 +34,29 @@ struct Track {
 pub struct Perf {
     surfaces: HashMap<ObjectId, Track>,
     launches: HashMap<u32, Instant>,
-    /// Duration of the compositor's renders (drm backend), the last `MAX_INTERVALS`.
-    renders: VecDeque<Duration>,
+    /// The compositor's drawn frames, the last `MAX_INTERVALS`.
+    renders: VecDeque<RenderStages>,
+    /// The GPU's time on the drawn frames, when the renderer measures it; it arrives frames
+    /// later than the frame itself.
+    gpu: VecDeque<Duration>,
+}
+
+/// Where the time of one drawn frame went.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RenderStages {
+    /// Building the scene: the elements of every output drawn.
+    pub build: Duration,
+    /// Damage tracking and drawing (on the CPU renderer, the pixels themselves).
+    pub draw: Duration,
+    /// Handing the frame to the display: copies, fences, the page flip.
+    pub submit: Duration,
+}
+
+impl RenderStages {
+    /// The compositor's time on the frame (the GPU runs alongside).
+    pub fn total(&self) -> Duration {
+        self.build + self.draw + self.submit
+    }
 }
 
 impl Perf {
@@ -114,30 +135,60 @@ impl Perf {
         report
     }
 
-    /// An the compositor render that lasted `duration`.
-    pub fn rendered(&mut self, duration: Duration) {
+    /// A frame the compositor drew (frames with nothing to draw are not counted).
+    pub fn rendered(&mut self, stages: RenderStages) {
         if self.renders.len() >= MAX_INTERVALS {
             self.renders.pop_front();
         }
-        self.renders.push_back(duration);
+        self.renders.push_back(stages);
     }
 
-    /// The render durations since the last reset.
+    /// The GPU time of a drawn frame.
+    pub fn gpu_rendered(&mut self, time: Duration) {
+        if self.gpu.len() >= MAX_INTERVALS {
+            self.gpu.pop_front();
+        }
+        self.gpu.push_back(time);
+    }
+
+    /// The times of the drawn frames since the last reset.
     pub fn render_times(&mut self, reset: bool) -> silica_control::commands::RenderTimes {
-        let durations: Vec<Duration> = self.renders.iter().copied().collect();
         // Counting the slow ones is not needed here: a long but finite period (mul_f64 on
         // Duration::MAX would overflow).
-        let stats = Stats::of(&durations, Duration::from_secs(3600));
+        let period = Duration::from_secs(3600);
+        let totals: Vec<Duration> = self.renders.iter().map(RenderStages::total).collect();
+        let stats = Stats::of(&totals, period);
+        let stage = |name: &str, durations: Vec<Duration>| {
+            let stats = Stats::of(&durations, period);
+            silica_control::commands::StageTimes {
+                stage: name.to_owned(),
+                frames: durations.len() as u64,
+                p50_ms: stats.p50,
+                p95_ms: stats.p95,
+                p99_ms: stats.p99,
+                max_ms: stats.max,
+            }
+        };
+        let mut stages = vec![
+            stage("build", self.renders.iter().map(|r| r.build).collect()),
+            stage("draw", self.renders.iter().map(|r| r.draw).collect()),
+            stage("submit", self.renders.iter().map(|r| r.submit).collect()),
+        ];
+        if !self.gpu.is_empty() {
+            stages.push(stage("gpu", self.gpu.iter().copied().collect()));
+        }
         if reset {
             self.renders.clear();
+            self.gpu.clear();
         }
         silica_control::commands::RenderTimes {
-            frames: durations.len() as u64,
+            frames: totals.len() as u64,
             mean_ms: stats.mean,
             p50_ms: stats.p50,
             p95_ms: stats.p95,
             p99_ms: stats.p99,
             max_ms: stats.max,
+            stages,
         }
     }
 

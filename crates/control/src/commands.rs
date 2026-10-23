@@ -401,7 +401,7 @@ pub const CATALOG: &[CommandSpec] = &[
     CommandSpec {
         id: PERF_RENDER,
         label: "Rendering times",
-        description: "Duration of the compositor's rendering per frame (drm backend): mean, percentiles, maximum.",
+        description: "Duration of the compositor's rendering per drawn frame: mean, percentiles, maximum, and the same per stage (build, draw, submit, gpu).",
         shortcut: None,
         params: || {
             json!({
@@ -1647,11 +1647,26 @@ pub struct MinimizeEffectParams {
     pub effect: String,
 }
 
-/// Result of [`PERF_RENDER`]: The compositor's rendering time per frame, in ms.
+/// Result of [`PERF_RENDER`]: The compositor's rendering time per drawn frame, in ms.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RenderTimes {
     pub frames: u64,
     pub mean_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+    /// The same frames split by stage: `build` (the scene), `draw` (damage and drawing),
+    /// `submit` (handing the frame to the display) and, when the renderer measures it, `gpu`.
+    #[serde(default)]
+    pub stages: Vec<StageTimes>,
+}
+
+/// The times of one stage of the drawn frames, in ms.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct StageTimes {
+    pub stage: String,
+    pub frames: u64,
     pub p50_ms: f64,
     pub p95_ms: f64,
     pub p99_ms: f64,

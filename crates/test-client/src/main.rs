@@ -2,12 +2,13 @@
 //! frame callback, for checks of the compositor in the VM.
 //!
 //! ```text
-//! silica-test-client [--color RRGGBB] [--size WxH] [--seconds N]
+//! silica-test-client [--color RRGGBB] [--size WxH] [--damage WxH] [--seconds N]
 //! silica-test-client --jit
 //! ```
 //!
 //! It prints `configured WxH` when the window is mapped, then `frames N` once per second, and
-//! exits after `--seconds` (default: until the window is closed).
+//! exits after `--seconds` (default: until the window is closed). Each frame damages the whole
+//! window, or only a centered `--damage` rectangle, as a spinner would.
 //!
 //! `--jit` maps no window: it runs code from anonymous memory, as a JIT does, and exits 0 if
 //! the kernel allowed it.
@@ -32,6 +33,7 @@ use wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
 struct Options {
     color: u32,
     size: (i32, i32),
+    damage: Option<(i32, i32)>,
     seconds: Option<u64>,
 }
 
@@ -42,6 +44,7 @@ struct State {
     wm_base: Option<XdgWmBase>,
     surface: Option<WlSurface>,
     size: (i32, i32),
+    damage: Option<(i32, i32)>,
     configured: bool,
     closed: bool,
     frames: u64,
@@ -120,6 +123,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut options = Options {
         color: 0xffd0_3030,
         size: (480, 320),
+        damage: None,
         seconds: None,
     };
     while let Some(arg) = args.next() {
@@ -133,16 +137,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
                     .ok_or(format!("invalid color: {text}"))?;
                 options.color = 0xff00_0000 | rgb;
             }
-            "--size" => {
-                let text = value()?;
-                options.size = text
-                    .split_once('x')
-                    .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
-                    .filter(|&(w, h): &(i32, i32)| {
-                        (1..=8192).contains(&w) && (1..=8192).contains(&h)
-                    })
-                    .ok_or(format!("invalid size: {text}"))?;
-            }
+            "--size" => options.size = size(&value()?)?,
+            "--damage" => options.damage = Some(size(&value()?)?),
             "--seconds" => {
                 let text = value()?;
                 options.seconds = Some(
@@ -156,6 +152,13 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     Ok(options)
 }
 
+fn size(text: &str) -> Result<(i32, i32), String> {
+    text.split_once('x')
+        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        .filter(|&(w, h): &(i32, i32)| (1..=8192).contains(&w) && (1..=8192).contains(&h))
+        .ok_or(format!("invalid size: {text}"))
+}
+
 fn run(options: &Options) -> Result<(), String> {
     let connection =
         Connection::connect_to_env().map_err(|e| format!("no Wayland display: {e}"))?;
@@ -164,6 +167,7 @@ fn run(options: &Options) -> Result<(), String> {
     connection.display().get_registry(&qh, ());
     let mut state = State {
         size: options.size,
+        damage: options.damage,
         ..State::default()
     };
     queue.roundtrip(&mut state).map_err(|e| e.to_string())?;
@@ -326,7 +330,11 @@ impl Dispatch<WlCallback, ()> for State {
             // The next frame: the same surface, damaged again so the compositor keeps sending
             // frame callbacks.
             if let Some(surface) = &state.surface {
-                surface.damage_buffer(0, 0, state.size.0, state.size.1);
+                let (w, h) = state.size;
+                let (dw, dh) = state
+                    .damage
+                    .map_or((w, h), |(dw, dh)| (dw.min(w), dh.min(h)));
+                surface.damage_buffer((w - dw) / 2, (h - dh) / 2, dw, dh);
                 surface.frame(qh, ());
                 surface.commit();
             }

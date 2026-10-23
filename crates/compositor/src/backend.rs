@@ -1,7 +1,10 @@
 //! The compositor's backends: headless (tests and CI) here and, in `drm.rs`, the real session.
 
+use smithay::backend::allocator::Fourcc;
+use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::pixman::PixmanRenderer;
+use smithay::backend::renderer::{Bind, Offscreen, Texture};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use std::time::{Duration, Instant};
 
@@ -9,11 +12,13 @@ use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::pixman;
 use smithay::reexports::wayland_server::Display;
-use smithay::utils::{Rectangle, Transform};
+use smithay::utils::{Buffer as BufferCoords, Rectangle, Size, Transform};
 use tracing::{info, warn};
 
 use crate::capture::{Capture, capture, capture_elements};
-use crate::render::{RenderContext, output_elements};
+use crate::egl::GpuTimer;
+use crate::perf::RenderStages;
+use crate::render::{OutputElement, RenderContext, output_elements};
 use crate::state::{Compositor, State};
 
 pub enum Backend {
@@ -29,30 +34,51 @@ impl Backend {
     /// The GLES renderer, if the backend has one (all except headless on pixman).
     pub fn gles(&mut self) -> Option<&mut GlesRenderer> {
         match self {
-            Backend::Headless(Headless::Gles(renderer)) => Some(renderer.as_mut()),
-            Backend::Headless(Headless::Pixman(_)) => None,
+            Backend::Headless(Headless {
+                renderer: HeadlessRenderer::Gles(renderer),
+                ..
+            }) => Some(renderer.as_mut()),
+            Backend::Headless(Headless {
+                renderer: HeadlessRenderer::Pixman(_),
+                ..
+            }) => None,
             #[cfg(feature = "drm")]
             Backend::Drm(backend) => Some(&mut backend.renderer),
         }
     }
 }
 
-pub enum Headless {
+pub struct Headless {
+    pub renderer: HeadlessRenderer,
+    /// Present when every tick is drawn (`SILICA_COMPOSITOR_HEADLESS_FRAMES=1`).
+    frames: Option<Box<HeadlessFrames>>,
+}
+
+pub enum HeadlessRenderer {
     Gles(Box<GlesRenderer>),
     Pixman(PixmanRenderer),
 }
 
+/// Headless drawing on every tick, to measure the renderer without a display: the damage of
+/// each frame goes into an offscreen canvas, as on DRM, and the frame counts in `perf.render`.
+struct HeadlessFrames {
+    damage_tracker: OutputDamageTracker,
+    canvas: Option<GlesTexture>,
+    cursor: Option<GlesTexture>,
+    timer: Option<GpuTimer>,
+}
+
 /// The headless renderer, from `SILICA_COMPOSITOR_HEADLESS_RENDERER`: GLES on llvmpipe (default),
 /// `gpu` for GLES on the GPU, `pixman` without GLES. If EGL is missing, pixman.
-fn headless_renderer() -> Result<Headless, Box<dyn std::error::Error>> {
+fn headless_renderer() -> Result<HeadlessRenderer, Box<dyn std::error::Error>> {
     let choice = std::env::var("SILICA_COMPOSITOR_HEADLESS_RENDERER").unwrap_or_default();
     if choice != "pixman" {
         match crate::egl::headless_renderer(choice == "gpu") {
-            Ok(renderer) => return Ok(Headless::Gles(Box::new(renderer))),
+            Ok(renderer) => return Ok(HeadlessRenderer::Gles(Box::new(renderer))),
             Err(err) => warn!("headless without GLES, using pixman: {err}"),
         }
     }
-    Ok(Headless::Pixman(PixmanRenderer::new()?))
+    Ok(HeadlessRenderer::Pixman(PixmanRenderer::new()?))
 }
 
 /// Refresh rate declared for the headless output, in millihertz.
@@ -80,7 +106,7 @@ pub fn init_headless(
     mut display: Display<State>,
     (width, height): (i32, i32),
 ) -> Result<Compositor, Box<dyn std::error::Error>> {
-    let renderer = headless_renderer()?;
+    let mut renderer = headless_renderer()?;
     let mode = Mode {
         size: (width, height).into(),
         refresh: HEADLESS_REFRESH_MHZ,
@@ -91,16 +117,29 @@ pub fn init_headless(
         mode,
         Transform::Normal,
     );
+    let frames =
+        (std::env::var("SILICA_COMPOSITOR_HEADLESS_FRAMES").as_deref() == Ok("1")).then(|| {
+            Box::new(HeadlessFrames {
+                damage_tracker: OutputDamageTracker::from_output(&output),
+                canvas: None,
+                cursor: None,
+                timer: match &mut renderer {
+                    HeadlessRenderer::Gles(renderer) => GpuTimer::new(renderer),
+                    HeadlessRenderer::Pixman(_) => None,
+                },
+            })
+        });
     let mut state = State::new(
         &mut display,
         event_loop.handle(),
         event_loop.get_signal(),
         output,
-        Backend::Headless(renderer),
+        Backend::Headless(Headless { renderer, frames }),
     )?;
     event_loop
         .handle()
         .insert_source(Timer::from_duration(HEADLESS_FRAME), |_, _, data| {
+            data.state.render_headless_frame();
             data.state.advance_spaces(std::time::Instant::now());
             data.state.advance_panorama(std::time::Instant::now());
             data.state.send_frames();
@@ -109,7 +148,11 @@ pub fn init_headless(
             data.state.signal_frame_barriers();
             TimeoutAction::ToDuration(HEADLESS_FRAME)
         })?;
-    if let Backend::Headless(Headless::Gles(renderer)) = &state.backend {
+    if let Backend::Headless(Headless {
+        renderer: HeadlessRenderer::Gles(renderer),
+        ..
+    }) = &state.backend
+    {
         state.software_renderer = is_software(renderer);
     }
     info!("headless backend ready ({width}x{height})");
@@ -117,59 +160,155 @@ pub fn init_headless(
 }
 
 impl State {
-    /// Draws the current output offscreen and returns it as RGBA.
-    pub fn screenshot(&mut self) -> Result<Capture, String> {
+    /// Advances the animations to `now` and gathers the scene of the frame: the closing
+    /// windows and the genies are borrowed by the caller (`RenderContext { closing, genies,
+    /// ..scene }`).
+    fn scene_context(&mut self, now: Instant) -> RenderContext<'static> {
         let speed = self.animation_speed;
-        let now = Instant::now();
         self.genies.retain(|genie| !genie.finished(now, speed));
         let glass_quality = self.glass_quality();
-        self.advance_spaces(Instant::now());
-        self.advance_panorama(Instant::now());
-        let space_shift = self.space_shift();
-        let panorama = self.panorama_view();
-        let spaces = (self.workspaces.count(), self.workspaces.active);
-        let buttons = self.buttons_view();
-        let alt = self.alt_held();
-        let dark = self.dark();
-        let drag_icon = self.drag_icon_view();
-        let window_veil = self.window_veil_view();
+        self.advance_spaces(now);
+        self.advance_panorama(now);
         let lock_surfaces = self.lock_wl_surfaces();
-        let clear = if lock_surfaces.is_some() {
+        // Locked: black behind the lock surface, and the plain screen if the locker is gone.
+        let clear_color = if lock_surfaces.is_some() {
             [0.0, 0.0, 0.0, 1.0]
         } else {
             self.clear_color
         };
+        RenderContext {
+            buttons: self.buttons_view(),
+            alt: self.alt_held(),
+            clear_color,
+            animation_speed: speed,
+            closing: &[],
+            genies: &[],
+            now,
+            glass_quality,
+            glass_level: self.theme_config.glass,
+            space_shift: self.space_shift(),
+            panorama: self.panorama_view(),
+            spaces: (self.workspaces.count(), self.workspaces.active),
+            dark: self.dark(),
+            drag_icon: self.drag_icon_view(),
+            window_veil: self.window_veil_view(),
+            lock_surfaces,
+        }
+    }
+
+    /// Draws the frame of this tick offscreen, as a display would, when headless frames are on
+    /// (`SILICA_COMPOSITOR_HEADLESS_FRAMES=1`): the damage goes into a canvas kept from frame to
+    /// frame, and a drawn frame counts in `perf.render`.
+    pub fn render_headless_frame(&mut self) {
+        if !matches!(
+            &self.backend,
+            Backend::Headless(Headless {
+                renderer: HeadlessRenderer::Gles(_),
+                frames: Some(_),
+            })
+        ) {
+            return;
+        }
+        let now = Instant::now();
+        let speed = self.animation_speed;
+        self.closing.retain(|closing| !closing.finished(now, speed));
+        let scene = self.scene_context(now);
+        let clear = scene.clear_color;
+        let pointer = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location());
+        let cursor_status = self.effective_cursor();
+        let scale = self.output.current_scale().fractional_scale();
+        let accessibility = self.accessibility;
+        let Backend::Headless(Headless {
+            renderer: HeadlessRenderer::Gles(renderer),
+            frames: Some(frames),
+        }) = &mut self.backend
+        else {
+            return;
+        };
+        let renderer = renderer.as_mut();
+        if let Some(timer) = &mut frames.timer {
+            timer.begin(renderer);
+        }
+        let context = RenderContext {
+            closing: &self.closing,
+            genies: &self.genies,
+            ..scene
+        };
+        let mut elements = output_elements(renderer, &self.space, &self.output, &context);
+        if frames.cursor.is_none() {
+            frames.cursor = crate::cursor::default_texture(renderer);
+        }
+        let origin = self
+            .space
+            .output_geometry(&self.output)
+            .map(|g| g.loc.to_f64())
+            .unwrap_or_default();
+        if let Some(location) = pointer {
+            let named = frames
+                .cursor
+                .as_ref()
+                .map(|texture| (texture, (0, 0), None));
+            let cursor =
+                crate::cursor::elements(renderer, &cursor_status, named, location - origin, scale);
+            elements.splice(0..0, cursor);
+        }
+        let elements = crate::accessibility::post_process(
+            renderer,
+            &self.output,
+            elements,
+            pointer.map(|p| p - origin),
+            clear,
+            &accessibility,
+        );
+        let mut stages = RenderStages {
+            build: now.elapsed(),
+            ..Default::default()
+        };
+        let drawn = match draw_headless(renderer, frames, &self.output, &elements, clear) {
+            Ok(Some((draw, submit))) => {
+                stages.draw = draw;
+                stages.submit = submit;
+                self.perf.rendered(stages);
+                true
+            }
+            Ok(None) => false,
+            Err(err) => {
+                warn!("headless frame: {err}");
+                false
+            }
+        };
+        if let Some(timer) = &mut frames.timer {
+            timer.end(renderer, drawn);
+            timer.collect(renderer, |time| self.perf.gpu_rendered(time));
+        }
+    }
+
+    /// Draws the current output offscreen and returns it as RGBA.
+    pub fn screenshot(&mut self) -> Result<Capture, String> {
+        let scene = self.scene_context(Instant::now());
+        let clear = scene.clear_color;
         if let Some(renderer) = self.backend.gles() {
             let context = RenderContext {
-                buttons,
-                alt,
-                clear_color: clear,
-                animation_speed: self.animation_speed,
                 closing: &self.closing,
                 genies: &self.genies,
-                now: Instant::now(),
-                glass_quality,
-                glass_level: self.theme_config.glass,
-                space_shift,
-                panorama,
-                spaces,
-                dark,
-                drag_icon,
-                window_veil,
-                lock_surfaces,
+                ..scene
             };
             let elements = output_elements(renderer, &self.space, &self.output, &context);
             return capture_elements::<_, GlesTexture, _>(renderer, &self.output, &elements, clear);
         }
         match &mut self.backend {
-            Backend::Headless(Headless::Pixman(renderer)) => {
-                capture::<_, pixman::Image<'static, 'static>>(
-                    renderer,
-                    &self.output,
-                    &self.space,
-                    self.clear_color,
-                )
-            }
+            Backend::Headless(Headless {
+                renderer: HeadlessRenderer::Pixman(renderer),
+                ..
+            }) => capture::<_, pixman::Image<'static, 'static>>(
+                renderer,
+                &self.output,
+                &self.space,
+                self.clear_color,
+            ),
             _ => Err("no renderer for the screenshot".to_owned()),
         }
     }
@@ -445,4 +584,45 @@ impl State {
             .get_keyboard()
             .is_some_and(|keyboard| keyboard.modifier_state().alt)
     }
+}
+
+/// Renders `elements` into the headless canvas with the damage since the last frame, and waits
+/// for the renderer to finish. It gives the time spent drawing and waiting, nothing when
+/// nothing changed.
+fn draw_headless(
+    renderer: &mut GlesRenderer,
+    frames: &mut HeadlessFrames,
+    output: &Output,
+    elements: &[OutputElement],
+    clear: [f32; 4],
+) -> Result<Option<(Duration, Duration)>, String> {
+    let start = Instant::now();
+    let mode = output
+        .current_mode()
+        .map(|mode| mode.size)
+        .unwrap_or_default();
+    let size = Size::<i32, BufferCoords>::from((mode.w, mode.h));
+    let fresh = frames.canvas.as_ref().is_none_or(|c| c.size() != size);
+    if fresh {
+        let canvas: GlesTexture = renderer
+            .create_buffer(Fourcc::Abgr8888, size)
+            .map_err(|e| format!("canvas: {e}"))?;
+        frames.canvas = Some(canvas);
+    }
+    let Some(canvas) = frames.canvas.as_mut() else {
+        return Err("no canvas".to_owned());
+    };
+    let mut canvas = renderer
+        .bind(canvas)
+        .map_err(|e| format!("bind canvas: {e}"))?;
+    let result = frames
+        .damage_tracker
+        .render_output(renderer, &mut canvas, usize::from(!fresh), elements, clear)
+        .map_err(|e| format!("render: {e:?}"))?;
+    if result.damage.is_none() {
+        return Ok(None);
+    }
+    let drawn = Instant::now();
+    result.sync.wait().map_err(|e| format!("sync: {e:?}"))?;
+    Ok(Some((drawn - start, drawn.elapsed())))
 }

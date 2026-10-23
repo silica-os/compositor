@@ -101,6 +101,8 @@ pub struct DrmBackend {
     last_dark: bool,
     /// The default cursor, drawn when no client sets one and there is no theme.
     cursor: Option<GlesTexture>,
+    /// The GPU time of the frames, for `perf.render`, when the driver measures it.
+    gpu_timer: Option<crate::egl::GpuTimer>,
     /// The frames of the theme already uploaded, by name, scale (×100) and frame, with their
     /// hotspot and the element id the damage tracker follows.
     cursors: std::collections::HashMap<
@@ -239,7 +241,8 @@ fn display_output(choice: &Choice) -> Output {
 }
 
 /// Renders `elements` into the canvas of `surface` with the damage since the last frame, then
-/// copies the canvas into the next scanout buffer and queues it; false when nothing changed.
+/// copies the canvas into the next scanout buffer and queues it. It gives the time spent
+/// drawing and submitting, nothing when nothing changed.
 ///
 /// The damage tracker draws into the canvas, a texture that keeps its contents from frame to
 /// frame (age 1), so a frame repaints only what changed. The scanout buffers are not trusted
@@ -251,7 +254,8 @@ fn render_surface(
     elements: &[crate::render::OutputElement],
     clear_color: [f32; 4],
     feedback: Option<OutputPresentationFeedback>,
-) -> Result<bool, String> {
+) -> Result<Option<(Duration, Duration)>, String> {
+    let start = Instant::now();
     let (w, h) = surface.mode.size();
     let size = Size::<i32, BufferCoords>::from((i32::from(w), i32::from(h)));
     let format = surface.gbm.format();
@@ -284,8 +288,9 @@ fn render_surface(
         )
         .map_err(|e| format!("render: {e:?}"))?;
     let Some(damage) = result.damage.cloned() else {
-        return Ok(false);
+        return Ok(None);
     };
+    let drawn = Instant::now();
     (dmabuf, _) = surface
         .gbm
         .next_buffer()
@@ -307,7 +312,7 @@ fn render_surface(
         .gbm
         .queue_buffer(Some(sync), Some(damage), feedback)
         .map_err(|e| format!("queue: {e}"))?;
-    Ok(true)
+    Ok(Some((drawn - start, drawn.elapsed())))
 }
 
 fn create_surface(
@@ -361,7 +366,7 @@ pub fn init_drm(
         DrmDevice::new(fd.clone(), true).map_err(|e| format!("DRM device: {e}"))?;
     let syncobj_fd = fd.clone();
     let gbm = GbmDevice::new(fd).map_err(|e| format!("GBM device: {e}"))?;
-    let renderer = crate::egl::gbm_renderer(gbm.clone())?;
+    let mut renderer = crate::egl::gbm_renderer(gbm.clone())?;
     let software = EGLDevice::device_for_display(renderer.egl_context().display())
         .is_ok_and(|device| device.is_software());
     info!(
@@ -410,6 +415,7 @@ pub fn init_drm(
         return Err(format!("libinput: cannot assign seat {seat}").into());
     }
     let device_id = drm.device_id();
+    let gpu_timer = crate::egl::GpuTimer::new(&mut renderer);
     let backend = DrmBackend {
         renderer,
         session,
@@ -426,6 +432,7 @@ pub fn init_drm(
         last_frame: Instant::now(),
         last_dark: false,
         cursor: None,
+        gpu_timer,
         cursors: std::collections::HashMap::new(),
     };
     let mut state = State::new(
@@ -1173,6 +1180,9 @@ impl State {
             window_veil,
             lock_surfaces,
         };
+        if let Some(timer) = &mut backend.gpu_timer {
+            timer.begin(&mut backend.renderer);
+        }
         let mut elements = crate::render::output_elements(
             &mut backend.renderer,
             &self.space,
@@ -1180,7 +1190,7 @@ impl State {
             &context,
         );
         if backend.cursor.is_none() {
-            backend.cursor = default_cursor(&mut backend.renderer);
+            backend.cursor = crate::cursor::default_texture(&mut backend.renderer);
         }
         if let Some((key, image)) = &themed
             && !backend.cursors.contains_key(key)
@@ -1240,6 +1250,11 @@ impl State {
             clear_color,
             &accessibility,
         );
+        let mut stages = crate::perf::RenderStages {
+            build: now.elapsed(),
+            ..Default::default()
+        };
+        let mut drawn = false;
         if primary_ready && let Some(surface) = &mut backend.surface {
             let queued = render_surface(
                 &mut backend.renderer,
@@ -1250,8 +1265,11 @@ impl State {
             );
             match queued {
                 Ok(queued) => {
-                    backend.pending = queued;
-                    backend.quiet = if queued {
+                    backend.pending = queued.is_some();
+                    backend.quiet = if let Some((draw, submit)) = queued {
+                        drawn = true;
+                        stages.draw += draw;
+                        stages.submit += submit;
                         0
                     } else {
                         backend.quiet.saturating_add(1)
@@ -1271,6 +1289,7 @@ impl State {
             ..context
         };
         for extra in backend.extras.iter_mut().filter(|e| !e.pending) {
+            let building = Instant::now();
             let mut elements = crate::render::output_elements(
                 &mut backend.renderer,
                 &self.space,
@@ -1311,6 +1330,7 @@ impl State {
                 clear_color,
                 &accessibility,
             );
+            stages.build += building.elapsed();
             match render_surface(
                 &mut backend.renderer,
                 &mut extra.surface,
@@ -1318,27 +1338,28 @@ impl State {
                 clear_color,
                 None,
             ) {
-                Ok(queued) => extra.pending = queued,
+                Ok(queued) => {
+                    extra.pending = queued.is_some();
+                    if let Some((draw, submit)) = queued {
+                        drawn = true;
+                        stages.draw += draw;
+                        stages.submit += submit;
+                    }
+                }
                 Err(err) => warn!("DRM frame on {}: {err}", extra.output.name()),
             }
         }
+        if let Some(timer) = &mut backend.gpu_timer {
+            timer.end(&mut backend.renderer, drawn);
+            timer.collect(&mut backend.renderer, |time| self.perf.gpu_rendered(time));
+        }
         backend.last_frame = now;
         backend.last_dark = dark;
-        self.perf.rendered(now.elapsed());
+        if drawn {
+            self.perf.rendered(stages);
+        }
         self.send_frames();
         self.signal_frame_barriers();
-    }
-}
-
-/// The default cursor as a texture, generated in code (see `cursor.rs`).
-fn default_cursor(renderer: &mut GlesRenderer) -> Option<GlesTexture> {
-    let (w, h, pixels) = crate::cursor::arrow();
-    match renderer.import_memory(&pixels, Fourcc::Abgr8888, (w, h).into(), false) {
-        Ok(texture) => Some(texture),
-        Err(err) => {
-            warn!("default cursor: {err}");
-            None
-        }
     }
 }
 
