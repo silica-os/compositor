@@ -34,7 +34,11 @@ use smithay::desktop::utils::OutputPresentationFeedback;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, LoopHandle, channel};
-use smithay::reexports::drm::control::{Device as ControlDevice, ModeTypeFlags, connector, crtc};
+use smithay::reexports::drm::control::atomic::AtomicModeReq;
+use smithay::reexports::drm::control::{
+    AtomicCommitFlags, Device as ControlDevice, ModeTypeFlags, connector, crtc, plane, property,
+};
+use smithay::reexports::drm::{ClientCapability, Device as _};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::Display;
@@ -154,6 +158,58 @@ struct OutputSurface {
     /// A frame drawn that waits for the GPU before it is queued ([`FenceWaiter`]): its number
     /// and its presentation feedback.
     waiting: Option<(u64, Option<OutputPresentationFeedback>)>,
+    /// The cursor plane's hotspot, on a virtual GPU.
+    hotspot: Option<CursorHotspot>,
+}
+
+/// The hotspot of a virtual GPU's cursor plane (virtio-gpu, …): its host draws the cursor
+/// itself and needs to know where the pointer is in the image. The kernel shows such a plane
+/// only to a client that sets it (`DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT`); Smithay's commits
+/// leave these properties alone, so they are set apart, when the image changes.
+struct CursorHotspot {
+    fd: DrmDeviceFd,
+    plane: plane::Handle,
+    x: property::Handle,
+    y: property::Handle,
+    set: Option<(i32, i32)>,
+}
+
+impl CursorHotspot {
+    /// The hotspot properties of the surface's cursor plane, if it has them.
+    fn of(drm: &DrmDevice, surface: &smithay::backend::drm::DrmSurface) -> Option<Self> {
+        let plane = surface.planes().cursor.first()?.handle;
+        let properties = drm.get_properties(plane).ok()?;
+        let find = |name: &[u8]| {
+            properties.iter().find_map(|(property, _)| {
+                drm.get_property(*property)
+                    .is_ok_and(|info| info.name().to_bytes() == name)
+                    .then_some(*property)
+            })
+        };
+        Some(Self {
+            fd: drm.device_fd().clone(),
+            plane,
+            x: find(b"HOTSPOT_X")?,
+            y: find(b"HOTSPOT_Y")?,
+            set: None,
+        })
+    }
+
+    /// Sets the hotspot, in the image's pixels, before a frame that shows it. No frame waits
+    /// for its flip then, so the commit goes through at once.
+    fn show(&mut self, (x, y): (i32, i32)) {
+        if self.set == Some((x, y)) {
+            return;
+        }
+        let mut request = AtomicModeReq::new();
+        request.add_property(self.plane, self.x, property::Value::SignedRange(x.into()));
+        request.add_property(self.plane, self.y, property::Value::SignedRange(y.into()));
+        if let Err(err) = self.fd.atomic_commit(AtomicCommitFlags::empty(), request) {
+            warn!("cursor hotspot: {err}");
+        }
+        // Not tried again on each frame: the cursor still works, a few pixels off on the host.
+        self.set = Some((x, y));
+    }
 }
 
 /// Waits for the GPU off the event loop, for the frames whose fence cannot go to the display
@@ -386,6 +442,7 @@ fn create_surface(
     let surface = drm
         .create_surface(choice.crtc, choice.mode, &[choice.connector])
         .map_err(|e| format!("DRM surface on {}: {e}", choice.name))?;
+    let hotspot = CursorHotspot::of(drm, &surface);
     // The CPU renderer draws linear buffers: where the display has no modifiers the swapchain
     // is allocated with an implicit one, which must then be linear.
     let mut flags = GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT;
@@ -414,6 +471,7 @@ fn create_surface(
         compositor,
         drawn: None,
         waiting: None,
+        hotspot,
     })
 }
 
@@ -432,6 +490,15 @@ pub fn init_drm(
         )
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let fd = DrmDeviceFd::new(DeviceFd::from(fd));
+    // A virtual GPU shows its cursor plane only to a compositor that sets its hotspot (see
+    // `CursorHotspot`), which needs atomic modesetting first; other drivers refuse it and need
+    // nothing. Before the device opens: Smithay maps the planes' properties then.
+    if fd
+        .set_client_capability(ClientCapability::Atomic, true)
+        .is_ok()
+    {
+        let _ = fd.set_client_capability(ClientCapability::CursorPlaneHotspot, true);
+    }
     let (mut drm, drm_events) =
         DrmDevice::new(fd.clone(), true).map_err(|e| format!("DRM device: {e}"))?;
     let syncobj_fd = fd.clone();
@@ -762,6 +829,10 @@ impl State {
         for surface in surfaces {
             // A frame waiting for the GPU is dropped: the next one is drawn whole.
             surface.waiting = None;
+            // Whoever had the display may have moved the hotspot.
+            if let Some(hotspot) = &mut surface.hotspot {
+                hotspot.set = None;
+            }
             if let Err(err) = surface.compositor.reset_state() {
                 warn!("DRM: reset: {err}");
             }
@@ -1322,6 +1393,7 @@ impl State {
                 .cursors
                 .insert(key.clone(), crate::cursor::NamedCursor::frame(image, scale));
         }
+        let mut hotspot = None;
         if let Some(location) = pointer {
             let origin = self
                 .space
@@ -1332,6 +1404,7 @@ impl State {
                 .as_ref()
                 .and_then(|(key, _)| backend.cursors.get(key))
                 .unwrap_or(&backend.cursor);
+            hotspot = crate::cursor::hotspot(&cursor_status, Some(named), scale);
             let cursor = crate::cursor::elements(
                 &mut backend.renderer,
                 &cursor_status,
@@ -1378,6 +1451,9 @@ impl State {
             None => {}
         };
         if primary_ready && let Some(surface) = &mut backend.surface {
+            if let (Some(at), Some(plane)) = (hotspot, &mut surface.hotspot) {
+                plane.show(at);
+            }
             let queued = render_surface(
                 &mut backend.renderer,
                 surface,
@@ -1426,12 +1502,19 @@ impl State {
                     .as_ref()
                     .and_then(|(key, _)| backend.cursors.get(key))
                     .unwrap_or(&backend.cursor);
+                let scale = extra.output.current_scale().fractional_scale();
+                if let (Some(at), Some(plane)) = (
+                    crate::cursor::hotspot(&cursor_status, Some(named), scale),
+                    &mut extra.surface.hotspot,
+                ) {
+                    plane.show(at);
+                }
                 let cursor = crate::cursor::elements(
                     &mut backend.renderer,
                     &cursor_status,
                     Some(named),
                     location - area.loc.to_f64(),
-                    extra.output.current_scale().fractional_scale(),
+                    scale,
                 );
                 elements.splice(0..0, cursor);
             }

@@ -43,6 +43,9 @@ struct State {
     shm: Option<WlShm>,
     wm_base: Option<XdgWmBase>,
     surface: Option<WlSurface>,
+    /// The window's buffer, attached again on each frame: a commit without a buffer brings
+    /// no damage.
+    buffer: Option<WlBuffer>,
     size: (i32, i32),
     damage: Option<(i32, i32)>,
     configured: bool,
@@ -195,7 +198,7 @@ fn run(options: &Options) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         if state.configured && !drawn {
             println!("configured {}x{}", state.size.0, state.size.1);
-            draw(&state, options.color, &qh)?;
+            draw(&mut state, options.color, &qh)?;
             drawn = true;
         }
         if reported.elapsed() >= Duration::from_secs(1) {
@@ -215,7 +218,7 @@ fn run(options: &Options) -> Result<(), String> {
 }
 
 /// Attaches a new buffer of the window's size, asks for the next frame and commits.
-fn draw(state: &State, color: u32, qh: &QueueHandle<State>) -> Result<(), String> {
+fn draw(state: &mut State, color: u32, qh: &QueueHandle<State>) -> Result<(), String> {
     let (Some(shm), Some(surface)) = (&state.shm, &state.surface) else {
         return Ok(());
     };
@@ -240,6 +243,7 @@ fn draw(state: &State, color: u32, qh: &QueueHandle<State>) -> Result<(), String
     surface.damage_buffer(0, 0, w, h);
     surface.frame(qh, ());
     surface.commit();
+    state.buffer = Some(buffer);
     Ok(())
 }
 
@@ -334,6 +338,7 @@ impl Dispatch<WlCallback, ()> for State {
                 let (dw, dh) = state
                     .damage
                     .map_or((w, h), |(dw, dh)| (dw.min(w), dh.min(h)));
+                surface.attach(state.buffer.as_ref(), 0, 0);
                 surface.damage_buffer((w - dw) / 2, (h - dh) / 2, dw, dh);
                 surface.frame(qh, ());
                 surface.commit();

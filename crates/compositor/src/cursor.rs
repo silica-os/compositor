@@ -16,6 +16,7 @@ use smithay::backend::renderer::element::memory::{
 };
 use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Size, Transform};
 use smithay::wayland::compositor::with_states;
 
@@ -124,14 +125,8 @@ pub fn elements(
     match status {
         CursorImageStatus::Hidden => Vec::new(),
         CursorImageStatus::Surface(surface) => {
-            let hotspot = with_states(surface, |states| {
-                states
-                    .data_map
-                    .get::<CursorImageSurfaceData>()
-                    .and_then(|data| data.lock().ok().map(|data| data.hotspot))
-            })
-            .unwrap_or_default();
-            let at = (location - hotspot.to_f64()).to_physical_precise_round(scale);
+            let at =
+                (location - surface_hotspot(surface).to_f64()).to_physical_precise_round(scale);
             render_elements_from_surface_tree(renderer, surface, at, scale, 1.0, Kind::Cursor)
                 .into_iter()
                 .map(OutputElement::Surface)
@@ -159,6 +154,36 @@ pub fn elements(
             }
         }
     }
+}
+
+/// The hotspot of the pointer's image, in its pixels at `scale`: for a display that draws the
+/// cursor plane itself (a virtual GPU's host), where the pointer is in the image.
+pub fn hotspot(
+    status: &CursorImageStatus,
+    named: Option<&NamedCursor>,
+    scale: f64,
+) -> Option<(i32, i32)> {
+    match status {
+        CursorImageStatus::Hidden => None,
+        CursorImageStatus::Surface(surface) => {
+            let at = surface_hotspot(surface)
+                .to_f64()
+                .to_physical_precise_round::<f64, i32>(scale);
+            Some((at.x, at.y))
+        }
+        CursorImageStatus::Named(_) => named.map(|named| named.hotspot),
+    }
+}
+
+/// The hotspot a client set on its cursor surface, in points.
+fn surface_hotspot(surface: &WlSurface) -> Point<i32, Logical> {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .get::<CursorImageSurfaceData>()
+            .and_then(|data| data.lock().ok().map(|data| data.hotspot))
+    })
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
