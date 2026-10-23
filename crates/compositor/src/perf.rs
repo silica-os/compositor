@@ -39,6 +39,9 @@ pub struct Perf {
     /// The GPU's time on the drawn frames, when the renderer measures it; it arrives frames
     /// later than the frame itself.
     gpu: VecDeque<Duration>,
+    /// Frames shown with nothing composed (planes only), and of those the direct scanouts.
+    planes_only: u64,
+    scanout: u64,
 }
 
 /// Where the time of one drawn frame went.
@@ -143,6 +146,13 @@ impl Perf {
         self.renders.push_back(stages);
     }
 
+    /// A frame shown without composing: a plane moved (the cursor) or, with `scanout`, a
+    /// client's buffer is on the primary plane.
+    pub fn shown_on_planes(&mut self, scanout: bool) {
+        self.planes_only += 1;
+        self.scanout += u64::from(scanout);
+    }
+
     /// The GPU time of a drawn frame.
     pub fn gpu_rendered(&mut self, time: Duration) {
         if self.gpu.len() >= MAX_INTERVALS {
@@ -177,9 +187,12 @@ impl Perf {
         if !self.gpu.is_empty() {
             stages.push(stage("gpu", self.gpu.iter().copied().collect()));
         }
+        let (planes_only, scanout) = (self.planes_only, self.scanout);
         if reset {
             self.renders.clear();
             self.gpu.clear();
+            self.planes_only = 0;
+            self.scanout = 0;
         }
         silica_control::commands::RenderTimes {
             frames: totals.len() as u64,
@@ -189,6 +202,8 @@ impl Perf {
             p99_ms: stats.p99,
             max_ms: stats.max,
             stages,
+            planes_only,
+            scanout,
         }
     }
 

@@ -1660,6 +1660,13 @@ pub struct RenderTimes {
     /// `submit` (handing the frame to the display) and, when the renderer measures it, `gpu`.
     #[serde(default)]
     pub stages: Vec<StageTimes>,
+    /// Frames shown without composing anything, not in the times above: only a plane changed
+    /// (the cursor moved), or a client's buffer went straight to the display.
+    #[serde(default)]
+    pub planes_only: u64,
+    /// Of `planes_only`, the frames whose primary plane scanned out a client's buffer.
+    #[serde(default)]
+    pub scanout: u64,
 }
 
 /// The times of one stage of the drawn frames, in ms.

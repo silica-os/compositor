@@ -15,6 +15,7 @@ use compositor_render::renderer::{SilicaRenderer, SilicaTexture};
 use compositor_render::shadow::WindowShadow;
 use compositor_render::title::Title;
 use compositor_render::titlebar::{Titlebar, TitlebarState};
+use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
@@ -48,6 +49,8 @@ render_elements! {
     Tone=compositor_render::backdrop::ToneElement,
     /// Textures: bar titles, snapshots of closing windows.
     Texture=RescaleRenderElement<TextureRenderElement<SilicaTexture>>,
+    /// The named cursor, which `DrmCompositor` can put on the cursor plane.
+    Memory=MemoryRenderBufferRenderElement<SilicaRenderer>,
     /// A window minimizing into the Dock or coming out of it, deformed as a genie.
     Genie=compositor_render::genie::GenieElement,
     /// The black band between two scrolling spaces.
@@ -771,7 +774,8 @@ fn window_elements_uncropped(
             1.0,
         ),
     };
-    // Full screen: no corners, bar, shadow or animation (as in the recordings).
+    // Full screen: no corners, bar, shadow or animation (as in the recordings). The client's
+    // buffer can then go to the display as is (direct scanout) when nothing covers it.
     if crate::windows::is_fullscreen(window) {
         return surfaces.into_iter().map(OutputElement::Surface).collect();
     }

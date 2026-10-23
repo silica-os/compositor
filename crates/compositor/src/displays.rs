@@ -480,8 +480,6 @@ impl State {
         if scale.is_some() || prefs.transform.is_some() {
             self.output
                 .change_current_state(None, prefs.transform, scale, None);
-            #[cfg(feature = "drm")]
-            self.drm_output_changed();
             self.output_resized();
             info!(
                 "display {}: scale {:?}, {:?}",

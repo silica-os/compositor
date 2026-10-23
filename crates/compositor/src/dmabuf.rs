@@ -8,6 +8,7 @@ use std::os::unix::fs::MetadataExt;
 
 use compositor_render::renderer::SilicaRenderer;
 use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::drm::DrmNode;
 use smithay::backend::egl::EGLDevice;
 use smithay::backend::renderer::ImportDma;
 use smithay::delegate_dmabuf;
@@ -20,11 +21,14 @@ use tracing::{info, warn};
 use crate::backend::Backend;
 use crate::state::State;
 
-/// The device (`dev_t`) of the render node the compositor's renderer runs on.
-fn main_device(renderer: &SilicaRenderer) -> Result<u64, String> {
-    let renderer = renderer
-        .as_gles()
-        .ok_or("the CPU renderer has no render node")?;
+/// The device (`dev_t`) of the render node the compositor's renderer runs on: GLES's EGL
+/// device, or `node` for the CPU renderer (the display's GPU, whose linear buffers it maps).
+fn main_device(renderer: &SilicaRenderer, node: Option<DrmNode>) -> Result<u64, String> {
+    let Some(renderer) = renderer.as_gles() else {
+        return node
+            .map(|node| node.dev_id())
+            .ok_or_else(|| "the GPU has no render node".to_owned());
+    };
     let device = EGLDevice::device_for_display(renderer.egl_context().display())
         .map_err(|e| format!("EGL device not found: {e}"))?;
     let path = device
@@ -41,9 +45,10 @@ pub fn create_global(
     state: &mut DmabufState,
     dh: &DisplayHandle,
     renderer: &SilicaRenderer,
+    node: Option<DrmNode>,
 ) -> DmabufGlobal {
     let formats = renderer.dmabuf_formats();
-    let feedback = main_device(renderer).and_then(|device| {
+    let feedback = main_device(renderer, node).and_then(|device| {
         DmabufFeedbackBuilder::new(device, formats.clone())
             .build()
             .map_err(|e| format!("feedback dmabuf: {e}"))

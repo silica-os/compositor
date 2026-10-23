@@ -2,17 +2,21 @@
 //! it. A client's cursor surface when it sets one, otherwise a default arrow generated here.
 //! The arrow is only the fallback when the XCursor theme (Adwaita by default, see
 //! `cursor_theme.rs`) is missing.
+//!
+//! The elements are `Kind::Cursor` with their pixels in memory (a named cursor) or in a shm
+//! buffer (a client's), so `DrmCompositor` can copy them into the cursor plane: moving the
+//! pointer then draws nothing. Where it cannot (no cursor plane, a scale the bitmap was not made
+//! for), they are drawn like any other element.
 
-use compositor_render::renderer::{SilicaRenderer, SilicaTexture};
+use compositor_render::renderer::SilicaRenderer;
 use smithay::backend::allocator::Fourcc;
-use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::element::Kind;
+use smithay::backend::renderer::element::memory::{
+    MemoryRenderBuffer, MemoryRenderBufferRenderElement,
+};
 use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
-use smithay::backend::renderer::element::texture::TextureRenderElement;
-use smithay::backend::renderer::element::utils::RescaleRenderElement;
-use smithay::backend::renderer::{ImportMem, Renderer, Texture};
 use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
-use smithay::utils::{Logical, Point, Transform};
+use smithay::utils::{Logical, Point, Size, Transform};
 use smithay::wayland::compositor::with_states;
 
 use crate::render::OutputElement;
@@ -61,26 +65,59 @@ pub fn arrow() -> (i32, i32, Vec<u8>) {
     )
 }
 
-/// The default cursor as a texture, generated in code ([`arrow`]).
-pub fn default_texture(renderer: &mut SilicaRenderer) -> Option<SilicaTexture> {
-    let (w, h, pixels) = arrow();
-    match renderer.import_memory(&pixels, Fourcc::Abgr8888, (w, h).into(), false) {
-        Ok(texture) => Some(texture),
-        Err(err) => {
-            tracing::warn!("default cursor: {err}");
-            None
+/// A named cursor's image, ready to draw: its pixels as the cursor plane takes them
+/// (premultiplied ARGB8888), its hotspot in pixels and its size in points.
+#[derive(Debug, Clone)]
+pub struct NamedCursor {
+    buffer: MemoryRenderBuffer,
+    hotspot: (i32, i32),
+    size: Size<i32, Logical>,
+}
+
+impl NamedCursor {
+    /// The built-in arrow ([`arrow`]), one pixel per point.
+    pub fn arrow() -> Self {
+        let (w, h, pixels) = arrow();
+        Self::new(&pixels, (w, h), (0, 0), 1.0)
+    }
+
+    /// A theme frame, drawn at `scale` pixels per point.
+    pub fn frame(image: &crate::cursor_theme::CursorImage, scale: f64) -> Self {
+        let size = (image.width as i32, image.height as i32);
+        Self::new(&image.rgba, size, image.hotspot, scale)
+    }
+
+    /// `rgba` (premultiplied) of `size` pixels, made for `scale` pixels per point.
+    fn new(rgba: &[u8], size: (i32, i32), hotspot: (i32, i32), scale: f64) -> Self {
+        let (pixels, _) = rgba.as_chunks::<4>();
+        let argb: Vec<u8> = pixels
+            .iter()
+            .flat_map(|&[r, g, b, a]| [b, g, r, a])
+            .collect();
+        let buffer = MemoryRenderBuffer::from_slice(
+            &argb,
+            Fourcc::Argb8888,
+            size,
+            1,
+            Transform::Normal,
+            None,
+        );
+        let scale = scale.max(0.1);
+        let points = |pixels: i32| ((f64::from(pixels) / scale).round() as i32).max(1);
+        Self {
+            buffer,
+            hotspot,
+            size: (points(size.0), points(size.1)).into(),
         }
     }
 }
 
 /// The elements of the pointer at `location` (logical, relative to the output), in front.
-/// `named` is the texture of a named shape (theme frame or built-in arrow) with its hotspot in
-/// physical pixels and, for a theme frame, the element id of that frame (the built-in arrow
-/// has none).
+/// `named` is the image of a named shape (theme frame or built-in arrow).
 pub fn elements(
     renderer: &mut SilicaRenderer,
     status: &CursorImageStatus,
-    named: Option<(&SilicaTexture, (i32, i32), Option<Id>)>,
+    named: Option<&NamedCursor>,
     location: Point<f64, Logical>,
     scale: f64,
 ) -> Vec<OutputElement> {
@@ -101,38 +138,27 @@ pub fn elements(
                 .collect()
         }
         CursorImageStatus::Named(_) => {
-            let Some((texture, hotspot, id)) = named else {
+            let Some(named) = named else {
                 return Vec::new();
             };
-            let at = location.to_physical(scale) - Point::from((hotspot.0, hotspot.1)).to_f64();
-            let element = TextureRenderElement::from_static_texture(
-                id.unwrap_or_else(default_id),
-                renderer.context_id(),
+            let at = location.to_physical(scale) - Point::from(named.hotspot).to_f64();
+            match MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
                 at,
-                texture.clone(),
-                1,
-                Transform::Normal,
+                &named.buffer,
                 None,
                 None,
-                Some(texture.size().to_logical(1, Transform::Normal)),
-                None,
+                Some(named.size),
                 Kind::Cursor,
-            );
-            vec![OutputElement::Texture(RescaleRenderElement::from_element(
-                element,
-                at.to_i32_round(),
-                1.0,
-            ))]
+            ) {
+                Ok(element) => vec![OutputElement::Memory(element)],
+                Err(err) => {
+                    tracing::warn!("cursor: {err}");
+                    Vec::new()
+                }
+            }
         }
     }
-}
-
-/// One id for the named cursor, so the damage tracker sees it move instead of a new element.
-fn default_id() -> Id {
-    thread_local! {
-        static ID: Id = Id::new();
-    }
-    ID.with(Id::clone)
 }
 
 #[cfg(test)]

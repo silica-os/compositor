@@ -46,11 +46,12 @@ pub struct Headless {
 }
 
 /// Headless drawing on every tick, to measure the renderer without a display: the damage of
-/// each frame goes into an offscreen canvas, as on DRM, and the frame counts in `perf.render`.
+/// each frame goes into an offscreen canvas kept from frame to frame (DRM draws only the damage
+/// too, into its swapchain buffers), and the frame counts in `perf.render`.
 struct HeadlessFrames {
     damage_tracker: OutputDamageTracker,
     canvas: Option<SilicaTexture>,
-    cursor: Option<SilicaTexture>,
+    cursor: crate::cursor::NamedCursor,
     timer: Option<GpuTimer>,
 }
 
@@ -108,7 +109,7 @@ pub fn init_headless(
             Box::new(HeadlessFrames {
                 damage_tracker: OutputDamageTracker::from_output(&output),
                 canvas: None,
-                cursor: None,
+                cursor: crate::cursor::NamedCursor::arrow(),
                 timer: renderer.gles().and_then(GpuTimer::new),
             })
         });
@@ -214,21 +215,19 @@ impl State {
             ..scene
         };
         let mut elements = output_elements(renderer, &self.space, &self.output, &context);
-        if frames.cursor.is_none() {
-            frames.cursor = crate::cursor::default_texture(renderer);
-        }
         let origin = self
             .space
             .output_geometry(&self.output)
             .map(|g| g.loc.to_f64())
             .unwrap_or_default();
         if let Some(location) = pointer {
-            let named = frames
-                .cursor
-                .as_ref()
-                .map(|texture| (texture, (0, 0), None));
-            let cursor =
-                crate::cursor::elements(renderer, &cursor_status, named, location - origin, scale);
+            let cursor = crate::cursor::elements(
+                renderer,
+                &cursor_status,
+                Some(&frames.cursor),
+                location - origin,
+                scale,
+            );
             elements.splice(0..0, cursor);
         }
         let elements = crate::accessibility::post_process(

@@ -1,7 +1,9 @@
 //! The real-session backend: The compositor on a TTY (or in a virtual machine) without a host
 //! compositor. libseat opens the devices and switches VT, udev finds the GPU and its
-//! connectors, DRM/KMS scans out GBM buffers drawn by the same GLES pipeline as the other
-//! backends (`compositor-render`: glass, shadows, corners), libinput feeds the input paths.
+//! connectors, libinput feeds the input paths. Each display has Smithay's `DrmCompositor`: the
+//! frame is drawn straight into a GBM swapchain buffer (GLES on a GPU, `compositor-raster`
+//! without one; see [`drm_renderer`]), the cursor goes on its own plane and a fullscreen
+//! client's buffer straight to the display when the hardware can.
 //!
 //! One output for now: the first connected connector with its preferred mode (`State` has
 //! one `Output`). When connectors change (hotplug), the output moves to the first connected
@@ -10,30 +12,33 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use compositor_render::renderer::{SilicaFrame, SilicaRenderer, SilicaTarget, SilicaTexture};
+use compositor_raster::CpuRenderer;
+use compositor_render::renderer::SilicaRenderer;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
-use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface};
+use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags, PrimaryPlaneElement};
+use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
+use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType};
 use smithay::backend::egl::EGLDevice;
 use smithay::backend::input::InputEvent;
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
-use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::{
-    Bind, BlitFrame, Frame, ImportMem, Offscreen, Renderer, Texture, TextureFilter,
-};
+use smithay::backend::renderer::Bind;
+use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::sync::SyncPoint;
+use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu};
 use smithay::desktop::utils::OutputPresentationFeedback;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
-use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay::reexports::calloop::{EventLoop, LoopHandle, channel};
 use smithay::reexports::drm::control::{Device as ControlDevice, ModeTypeFlags, connector, crtc};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::Display;
-use smithay::utils::{Buffer as BufferCoords, DeviceFd, Physical, Rectangle, Size, Transform};
+use smithay::utils::{DeviceFd, Transform};
 use tracing::{info, warn};
 
 use crate::backend::Backend;
@@ -86,6 +91,9 @@ pub struct DrmBackend {
     gbm: GbmDevice<DrmDeviceFd>,
     /// The `dev_t` of the GPU, to recognise its udev events.
     device_id: u64,
+    /// The GPU's render node: client buffers from it can be scanned out directly.
+    render_node: Option<DrmNode>,
+    fences: FenceWaiter,
     libinput: Libinput,
     /// The pointer devices, to apply the `input.*` settings again when it changes.
     devices: Vec<smithay::reexports::input::Device>,
@@ -101,19 +109,11 @@ pub struct DrmBackend {
     last_frame: Instant,
     last_dark: bool,
     /// The default cursor, drawn when no client sets one and there is no theme.
-    cursor: Option<SilicaTexture>,
+    cursor: crate::cursor::NamedCursor,
     /// The GPU time of the frames, for `perf.render`, when the driver measures it.
     gpu_timer: Option<crate::egl::GpuTimer>,
-    /// The frames of the theme already uploaded, by name, scale (×100) and frame, with their
-    /// hotspot and the element id the damage tracker follows.
-    cursors: std::collections::HashMap<
-        crate::cursor_theme::FrameKey,
-        (
-            SilicaTexture,
-            (i32, i32),
-            smithay::backend::renderer::element::Id,
-        ),
-    >,
+    /// The frames of the theme already loaded, by name, scale (×100) and frame.
+    cursors: std::collections::HashMap<crate::cursor_theme::FrameKey, crate::cursor::NamedCursor>,
 }
 
 /// A display beside the primary one: its own output, global and swapchain. The menu bar,
@@ -133,16 +133,84 @@ struct Displaced {
     location: smithay::utils::Point<i32, smithay::utils::Logical>,
 }
 
+/// Puts the frames of one display on screen: the swapchain drawn into, and the planes. The
+/// user data of a queued frame is its presentation feedback, given back at vblank.
+type OutputCompositor = DrmCompositor<
+    GbmAllocator<DrmDeviceFd>,
+    GbmFramebufferExporter<DrmDeviceFd>,
+    Option<OutputPresentationFeedback>,
+    DrmDeviceFd,
+>;
+
 /// The connector driven by the output, with its swapchain.
 struct OutputSurface {
     connector: connector::Handle,
     crtc: crtc::Handle,
     mode: smithay::reexports::drm::control::Mode,
-    /// The user data of a queued frame: its presentation feedback, given back at vblank.
-    gbm: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, Option<OutputPresentationFeedback>>,
-    damage_tracker: OutputDamageTracker,
-    /// What the damage tracker draws into, copied into each scanout buffer (`render_surface`).
-    canvas: Option<SilicaTexture>,
+    compositor: OutputCompositor,
+    /// The primary plane's damage count when it was last drawn: a frame that leaves it as is
+    /// only changed planes (the cursor), or shows a client's buffer directly.
+    drawn: Option<CommitCounter>,
+    /// A frame drawn that waits for the GPU before it is queued ([`FenceWaiter`]): its number
+    /// and its presentation feedback.
+    waiting: Option<(u64, Option<OutputPresentationFeedback>)>,
+}
+
+/// Waits for the GPU off the event loop, for the frames whose fence cannot go to the display
+/// with them (a driver without native fences): when one is done, the loop queues it
+/// (`State::drm_synced`). Nothing in `render_drm` blocks on the GPU.
+struct FenceWaiter {
+    sender: std::sync::mpsc::Sender<(crtc::Handle, u64, SyncPoint)>,
+    /// The number of the last frame handed over.
+    last: u64,
+}
+
+impl FenceWaiter {
+    fn new(handle: &LoopHandle<'static, Compositor>) -> Result<Self, Box<dyn std::error::Error>> {
+        let (done, ready) = channel::channel::<(crtc::Handle, u64)>();
+        let (sender, frames) = std::sync::mpsc::channel::<(crtc::Handle, u64, SyncPoint)>();
+        std::thread::Builder::new()
+            .name("drm-fences".to_owned())
+            .spawn(move || {
+                for (crtc, frame, sync) in frames {
+                    // Interrupted or not, the frame goes: a lost fence must not stall the
+                    // display.
+                    let _ = sync.wait();
+                    if done.send((crtc, frame)).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        handle.insert_source(ready, |event, _, data| {
+            if let channel::Event::Msg((crtc, frame)) = event {
+                data.state.drm_synced(crtc, frame);
+            }
+        })?;
+        Ok(Self { sender, last: 0 })
+    }
+}
+
+/// How a frame went to the display.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Queued {
+    /// The primary plane was drawn: the time spent drawing and handing it over.
+    Composited { draw: Duration, submit: Duration },
+    /// Only planes changed: the cursor moved, or (`scanout`) a client's buffer is on the
+    /// primary plane.
+    Planes { scanout: bool },
+}
+
+/// The renderer of the DRM backend, from `SILICA_RENDERER`: `gles`, `cpu` (compositor-raster),
+/// or `auto` (the default), GLES on a GPU and the CPU renderer when GLES would run on a software
+/// rasterizer (`software`): no shader interpreter, and no JIT, which the compositor is not
+/// entitled to (see `main.rs`).
+fn drm_renderer(gles: GlesRenderer, software: bool) -> SilicaRenderer {
+    match std::env::var("SILICA_RENDERER").as_deref() {
+        Ok("gles") => gles.into(),
+        Ok("cpu") => CpuRenderer::new().into(),
+        _ if software => CpuRenderer::new().into(),
+        _ => gles.into(),
+    }
 }
 
 /// A connected connector with the crtc that can drive it and the mode to use.
@@ -241,87 +309,76 @@ fn display_output(choice: &Choice) -> Output {
     output
 }
 
-/// Renders `elements` into the canvas of `surface` with the damage since the last frame, then
-/// copies the canvas into the next scanout buffer and queues it. It gives the time spent
-/// drawing and submitting, nothing when nothing changed.
+/// Draws `elements` on `surface` and queues the frame for scanout: the damage since the
+/// swapchain buffer's last frame is drawn straight into it, the cursor and a fullscreen
+/// client's buffer may go on planes instead. Nothing when nothing changed.
 ///
-/// The damage tracker draws into the canvas, a texture that keeps its contents from frame to
-/// frame (age 1), so a frame repaints only what changed. The scanout buffers are not trusted
-/// to keep theirs: on the dev VM's software GPU they do not survive as the swapchain age
-/// promises (silica-os/silica-desktop#233), so each one gets the whole canvas, a plain copy.
+/// A frame whose fence cannot go to the display with it is handed to `fences` and queued when
+/// the GPU is done (`State::drm_synced`); the CPU renderer's frames are done already.
 fn render_surface(
     renderer: &mut SilicaRenderer,
     surface: &mut OutputSurface,
+    fences: &mut FenceWaiter,
     elements: &[crate::render::OutputElement],
     clear_color: [f32; 4],
     feedback: Option<OutputPresentationFeedback>,
-) -> Result<Option<(Duration, Duration)>, String> {
+) -> Result<Option<Queued>, String> {
     let start = Instant::now();
-    let (w, h) = surface.mode.size();
-    let size = Size::<i32, BufferCoords>::from((i32::from(w), i32::from(h)));
-    let format = surface.gbm.format();
-    let fresh = surface
-        .canvas
-        .as_ref()
-        .is_none_or(|c| c.size() != size || c.format() != Some(format));
-    if fresh {
-        let canvas: SilicaTexture = renderer
-            .create_buffer(format, size)
-            .map_err(|e| format!("canvas: {e}"))?;
-        surface.canvas = Some(canvas);
-    }
-    let Some(canvas) = surface.canvas.as_mut() else {
-        return Err("no canvas".to_string());
-    };
-    // Declared before the canvas is bound: both bindings live as long as the copy's frame.
-    let mut dmabuf;
-    let mut canvas = renderer
-        .bind(canvas)
-        .map_err(|e| format!("bind canvas: {e}"))?;
-    let result = surface
-        .damage_tracker
-        .render_output(
-            renderer,
-            &mut canvas,
-            usize::from(!fresh),
-            elements,
-            clear_color,
-        )
-        .map_err(|e| format!("render: {e:?}"))?;
-    let Some(damage) = result.damage.cloned() else {
+    let frame = surface
+        .compositor
+        .render_frame(renderer, elements, clear_color, FrameFlags::DEFAULT)
+        .map_err(|e| format!("render: {e}"))?;
+    if frame.is_empty {
         return Ok(None);
+    }
+    let needs_sync = frame.needs_sync();
+    let (composited, scanout, sync) = match &frame.primary_element {
+        PrimaryPlaneElement::Swapchain(element) => {
+            let commit = element.damage.current_commit();
+            let composited = surface.drawn != Some(commit);
+            surface.drawn = Some(commit);
+            (composited, false, needs_sync.then(|| element.sync.clone()))
+        }
+        PrimaryPlaneElement::Element(_) => {
+            surface.drawn = None;
+            (false, true, None)
+        }
     };
     let drawn = Instant::now();
-    (dmabuf, _) = surface
-        .gbm
-        .next_buffer()
-        .map_err(|e| format!("next buffer: {e}"))?;
-    let mut target = renderer
-        .bind(&mut dmabuf)
-        .map_err(|e| format!("bind: {e}"))?;
-    let whole = Rectangle::from_size(Size::<i32, Physical>::from((size.w, size.h)));
-    let sync = {
-        let mut frame = renderer
-            .render(&mut canvas, whole.size, Transform::Normal)
-            .map_err(|e| format!("copy frame: {e}"))?;
-        match (&mut frame, &mut target) {
-            (SilicaFrame::Gles(frame), SilicaTarget::Gles(target)) => frame
-                .blit_to(target, whole, whole, TextureFilter::Nearest)
-                .map_err(|e| format!("copy: {e}"))?,
-            _ => return Err("copy: the canvas needs GLES".to_owned()),
+    let queued = |submit| {
+        if composited {
+            Queued::Composited {
+                draw: drawn - start,
+                submit,
+            }
+        } else {
+            Queued::Planes { scanout }
         }
-        frame.finish().map_err(|e| format!("copy finish: {e}"))?
     };
+    if let Some(sync) = sync.filter(|sync| !sync.is_reached()) {
+        fences.last += 1;
+        match fences.sender.send((surface.crtc, fences.last, sync)) {
+            Ok(()) => {
+                surface.waiting = Some((fences.last, feedback));
+                return Ok(Some(queued(drawn.elapsed())));
+            }
+            // The waiter is gone: the wait happens here.
+            Err(std::sync::mpsc::SendError((_, _, sync))) => {
+                let _ = sync.wait();
+            }
+        }
+    }
     surface
-        .gbm
-        .queue_buffer(Some(sync), Some(damage), feedback)
+        .compositor
+        .queue_frame(feedback)
         .map_err(|e| format!("queue: {e}"))?;
-    Ok(Some((drawn - start, drawn.elapsed())))
+    Ok(Some(queued(drawn.elapsed())))
 }
 
 fn create_surface(
     drm: &mut DrmDevice,
     gbm: &GbmDevice<DrmDeviceFd>,
+    render_node: Option<DrmNode>,
     renderer: &SilicaRenderer,
     output: &Output,
     choice: &Choice,
@@ -333,21 +390,27 @@ fn create_surface(
         gbm.clone(),
         GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
     );
+    let exporter = GbmFramebufferExporter::new(gbm.clone(), render_node);
     let formats = Bind::<Dmabuf>::supported_formats(renderer).unwrap_or_default();
-    let gbm = GbmBufferedSurface::new(
+    let compositor = DrmCompositor::new(
+        output,
         surface,
+        None,
         allocator,
-        &[Fourcc::Argb8888, Fourcc::Xrgb8888],
+        exporter,
+        [Fourcc::Argb8888, Fourcc::Xrgb8888],
         formats,
+        drm.cursor_size(),
+        Some(gbm.clone()),
     )
-    .map_err(|e| format!("GBM swapchain on {}: {e}", choice.name))?;
+    .map_err(|e| format!("DRM compositor on {}: {e}", choice.name))?;
     Ok(OutputSurface {
         connector: choice.connector,
         crtc: choice.crtc,
         mode: choice.mode,
-        gbm,
-        damage_tracker: OutputDamageTracker::from_output(output),
-        canvas: None,
+        compositor,
+        drawn: None,
+        waiting: None,
     })
 }
 
@@ -374,10 +437,20 @@ pub fn init_drm(
     let software = EGLDevice::device_for_display(gles.egl_context().display())
         .is_ok_and(|device| device.is_software());
     let gpu_timer = crate::egl::GpuTimer::new(&mut gles);
-    let renderer = SilicaRenderer::from(gles);
+    let renderer = drm_renderer(gles, software);
+    let gpu_timer = gpu_timer.filter(|_| renderer.as_gles().is_some());
+    let render_node = DrmNode::from_dev_id(drm.device_id())
+        .ok()
+        .and_then(|node| node.node_with_type(NodeType::Render))
+        .and_then(Result::ok);
     info!(
-        "DRM on {} (seat {seat}, software rendering: {software})",
-        path.display()
+        "DRM on {} (seat {seat}, software GPU: {software}, {} renderer)",
+        path.display(),
+        if renderer.as_gles().is_some() {
+            "GLES"
+        } else {
+            "CPU"
+        }
     );
 
     let choice = choose(&drm);
@@ -412,7 +485,14 @@ pub fn init_drm(
     );
     output.set_preferred(mode);
     let surface = match &choice {
-        Some(choice) => Some(create_surface(&mut drm, &gbm, &renderer, &output, choice)?),
+        Some(choice) => Some(create_surface(
+            &mut drm,
+            &gbm,
+            render_node,
+            &renderer,
+            &output,
+            choice,
+        )?),
         None => None,
     };
 
@@ -421,12 +501,15 @@ pub fn init_drm(
         return Err(format!("libinput: cannot assign seat {seat}").into());
     }
     let device_id = drm.device_id();
+    let fences = FenceWaiter::new(&event_loop.handle())?;
     let backend = DrmBackend {
         renderer,
         session,
         drm,
         gbm,
         device_id,
+        render_node,
+        fences,
         libinput: libinput.clone(),
         devices: Vec::new(),
         surface,
@@ -436,7 +519,7 @@ pub fn init_drm(
         quiet: 0,
         last_frame: Instant::now(),
         last_dark: false,
-        cursor: None,
+        cursor: crate::cursor::NamedCursor::arrow(),
         gpu_timer,
         cursors: std::collections::HashMap::new(),
     };
@@ -464,6 +547,7 @@ pub fn init_drm(
             &mut state.dmabuf_state,
             &dh,
             &backend.renderer,
+            backend.render_node,
         ));
     }
 
@@ -651,6 +735,9 @@ impl State {
         backend.libinput.suspend();
         backend.drm.pause();
         backend.pending = false;
+        for extra in &mut backend.extras {
+            extra.pending = false;
+        }
     }
 
     /// The session is back: the device state may have changed, so the buffers start over.
@@ -665,10 +752,21 @@ impl State {
         if let Err(err) = backend.drm.activate(false) {
             warn!("DRM: activate failed: {err}");
         }
-        if let Some(surface) = &mut backend.surface {
-            surface.gbm.reset_buffers();
+        let surfaces = backend
+            .surface
+            .iter_mut()
+            .chain(backend.extras.iter_mut().map(|e| &mut e.surface));
+        for surface in surfaces {
+            // A frame waiting for the GPU is dropped: the next one is drawn whole.
+            surface.waiting = None;
+            if let Err(err) = surface.compositor.reset_state() {
+                warn!("DRM: reset: {err}");
+            }
         }
         backend.pending = false;
+        for extra in &mut backend.extras {
+            extra.pending = false;
+        }
         self.drm_changed_inner();
         self.render_drm();
     }
@@ -683,7 +781,7 @@ impl State {
         };
         if surface.crtc != crtc {
             if let Some(extra) = backend.extras.iter_mut().find(|e| e.surface.crtc == crtc) {
-                if let Err(err) = extra.surface.gbm.frame_submitted() {
+                if let Err(err) = extra.surface.compositor.frame_submitted() {
                     warn!("DRM: frame submitted on {}: {err}", extra.output.name());
                 }
                 extra.pending = false;
@@ -691,7 +789,7 @@ impl State {
             }
             return;
         }
-        let feedback = match surface.gbm.frame_submitted() {
+        let feedback = match surface.compositor.frame_submitted() {
             Ok(feedback) => feedback.flatten(),
             Err(err) => {
                 warn!("DRM: frame submitted: {err}");
@@ -703,6 +801,32 @@ impl State {
             self.presented(feedback);
         }
         self.render_drm();
+    }
+
+    /// The GPU is done with frame `frame` of the display on `crtc`: it goes to the display,
+    /// unless the display started over since.
+    fn drm_synced(&mut self, crtc: crtc::Handle, frame: u64) {
+        let Some(backend) = self.drm_backend() else {
+            return;
+        };
+        let (surface, pending) = if let Some(surface) = backend
+            .surface
+            .as_mut()
+            .filter(|surface| surface.crtc == crtc)
+        {
+            (surface, &mut backend.pending)
+        } else if let Some(extra) = backend.extras.iter_mut().find(|e| e.surface.crtc == crtc) {
+            (&mut extra.surface, &mut extra.pending)
+        } else {
+            return;
+        };
+        let Some((_, feedback)) = surface.waiting.take_if(|(number, _)| *number == frame) else {
+            return;
+        };
+        if let Err(err) = surface.compositor.queue_frame(feedback) {
+            warn!("DRM: queue: {err}");
+            *pending = false;
+        }
     }
 
     /// A udev event: if it is our GPU, its connectors may have changed.
@@ -757,6 +881,7 @@ impl State {
         match create_surface(
             &mut backend.drm,
             &backend.gbm,
+            backend.render_node,
             &backend.renderer,
             &output,
             &choice,
@@ -801,6 +926,7 @@ impl State {
             match create_surface(
                 &mut backend.drm,
                 &backend.gbm,
+                backend.render_node,
                 &backend.renderer,
                 &output,
                 choice,
@@ -1007,6 +1133,7 @@ impl State {
         let created = create_surface(
             &mut backend.drm,
             &backend.gbm,
+            backend.render_node,
             &backend.renderer,
             &output,
             &choice,
@@ -1024,7 +1151,6 @@ impl State {
     /// Display power: off sets DPMS off on the CRTC (and `render_drm` stops drawing); on draws a
     /// full frame again, which re-enables it.
     pub fn drm_display_power(&mut self, on: bool) {
-        let output = self.output.clone();
         let Some(backend) = self.drm_backend() else {
             return;
         };
@@ -1032,22 +1158,14 @@ impl State {
             return;
         };
         if on {
-            surface.gbm.reset_buffers();
-            surface.damage_tracker = OutputDamageTracker::from_output(&output);
+            surface.compositor.reset_buffers();
             backend.pending = false;
             self.render_drm();
-        } else if let Err(err) = surface.gbm.surface().clear() {
-            warn!("display off: {err}");
-        }
-    }
-
-    /// The output's scale or rotation changed: the damage tracker follows it.
-    pub fn drm_output_changed(&mut self) {
-        let output = self.output.clone();
-        if let Some(backend) = self.drm_backend()
-            && let Some(surface) = &mut backend.surface
-        {
-            surface.damage_tracker = OutputDamageTracker::from_output(&output);
+        } else {
+            surface.waiting = None;
+            if let Err(err) = surface.compositor.clear() {
+                warn!("display off: {err}");
+            }
         }
     }
 
@@ -1194,30 +1312,12 @@ impl State {
             &self.output,
             &context,
         );
-        if backend.cursor.is_none() {
-            backend.cursor = crate::cursor::default_texture(&mut backend.renderer);
-        }
         if let Some((key, image)) = &themed
             && !backend.cursors.contains_key(key)
         {
-            match backend.renderer.import_memory(
-                &image.rgba,
-                Fourcc::Abgr8888,
-                (image.width as i32, image.height as i32).into(),
-                false,
-            ) {
-                Ok(texture) => {
-                    backend.cursors.insert(
-                        key.clone(),
-                        (
-                            texture,
-                            image.hotspot,
-                            smithay::backend::renderer::element::Id::new(),
-                        ),
-                    );
-                }
-                Err(err) => warn!("cursor {}: {err}", key.0),
-            }
+            backend
+                .cursors
+                .insert(key.clone(), crate::cursor::NamedCursor::frame(image, scale));
         }
         if let Some(location) = pointer {
             let origin = self
@@ -1228,15 +1328,11 @@ impl State {
             let named = themed
                 .as_ref()
                 .and_then(|(key, _)| backend.cursors.get(key))
-                .map(|(texture, hotspot, id)| (texture, *hotspot, Some(id.clone())))
-                .or(backend
-                    .cursor
-                    .as_ref()
-                    .map(|texture| (texture, (0, 0), None)));
+                .unwrap_or(&backend.cursor);
             let cursor = crate::cursor::elements(
                 &mut backend.renderer,
                 &cursor_status,
-                named,
+                Some(named),
                 location - origin.to_f64(),
                 scale,
             );
@@ -1260,10 +1356,28 @@ impl State {
             ..Default::default()
         };
         let mut drawn = false;
+        let mut planes = None;
+        // A drawn frame counts in `perf.render` with its stages, one that only changed planes
+        // apart.
+        let count = |queued: Option<Queued>,
+                     drawn: &mut bool,
+                     stages: &mut crate::perf::RenderStages,
+                     planes: &mut Option<bool>| match queued {
+            Some(Queued::Composited { draw, submit }) => {
+                *drawn = true;
+                stages.draw += draw;
+                stages.submit += submit;
+            }
+            Some(Queued::Planes { scanout }) => {
+                *planes = Some(planes.unwrap_or(false) || scanout);
+            }
+            None => {}
+        };
         if primary_ready && let Some(surface) = &mut backend.surface {
             let queued = render_surface(
                 &mut backend.renderer,
                 surface,
+                &mut backend.fences,
                 &elements,
                 clear_color,
                 Some(feedback),
@@ -1271,14 +1385,12 @@ impl State {
             match queued {
                 Ok(queued) => {
                     backend.pending = queued.is_some();
-                    backend.quiet = if let Some((draw, submit)) = queued {
-                        drawn = true;
-                        stages.draw += draw;
-                        stages.submit += submit;
+                    backend.quiet = if queued.is_some() {
                         0
                     } else {
                         backend.quiet.saturating_add(1)
                     };
+                    count(queued, &mut drawn, &mut stages, &mut planes);
                 }
                 Err(err) => {
                     backend.quiet = 0;
@@ -1308,15 +1420,11 @@ impl State {
                 let named = themed
                     .as_ref()
                     .and_then(|(key, _)| backend.cursors.get(key))
-                    .map(|(texture, hotspot, id)| (texture, *hotspot, Some(id.clone())))
-                    .or(backend
-                        .cursor
-                        .as_ref()
-                        .map(|texture| (texture, (0, 0), None)));
+                    .unwrap_or(&backend.cursor);
                 let cursor = crate::cursor::elements(
                     &mut backend.renderer,
                     &cursor_status,
-                    named,
+                    Some(named),
                     location - area.loc.to_f64(),
                     extra.output.current_scale().fractional_scale(),
                 );
@@ -1339,17 +1447,14 @@ impl State {
             match render_surface(
                 &mut backend.renderer,
                 &mut extra.surface,
+                &mut backend.fences,
                 &elements,
                 clear_color,
                 None,
             ) {
                 Ok(queued) => {
                     extra.pending = queued.is_some();
-                    if let Some((draw, submit)) = queued {
-                        drawn = true;
-                        stages.draw += draw;
-                        stages.submit += submit;
-                    }
+                    count(queued, &mut drawn, &mut stages, &mut planes);
                 }
                 Err(err) => warn!("DRM frame on {}: {err}", extra.output.name()),
             }
@@ -1362,6 +1467,8 @@ impl State {
         backend.last_dark = dark;
         if drawn {
             self.perf.rendered(stages);
+        } else if let Some(scanout) = planes {
+            self.perf.shown_on_planes(scanout);
         }
         self.send_frames();
         self.signal_frame_barriers();
