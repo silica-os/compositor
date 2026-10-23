@@ -595,7 +595,9 @@ impl State {
                         if let Some(discrete) = v120 {
                             frame = frame.v120(axis, discrete as i32);
                         }
-                    } else if source == AxisSource::Finger {
+                    } else if source == AxisSource::Finger && event.amount(axis) == Some(0.0) {
+                        // Only an axis libinput reports at zero has stopped; the other axis of
+                        // a one-axis scroll is just absent.
                         frame = frame.stop(axis);
                     }
                 }
