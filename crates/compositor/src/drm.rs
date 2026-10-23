@@ -386,10 +386,13 @@ fn create_surface(
     let surface = drm
         .create_surface(choice.crtc, choice.mode, &[choice.connector])
         .map_err(|e| format!("DRM surface on {}: {e}", choice.name))?;
-    let allocator = GbmAllocator::new(
-        gbm.clone(),
-        GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
-    );
+    // The CPU renderer draws linear buffers: where the display has no modifiers the swapchain
+    // is allocated with an implicit one, which must then be linear.
+    let mut flags = GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT;
+    if renderer.as_gles().is_none() {
+        flags |= GbmBufferFlags::LINEAR;
+    }
+    let allocator = GbmAllocator::new(gbm.clone(), flags);
     let exporter = GbmFramebufferExporter::new(gbm.clone(), render_node);
     let formats = Bind::<Dmabuf>::supported_formats(renderer).unwrap_or_default();
     let compositor = DrmCompositor::new(
@@ -1357,6 +1360,7 @@ impl State {
         };
         let mut drawn = false;
         let mut planes = None;
+        let mut failed = false;
         // A drawn frame counts in `perf.render` with its stages, one that only changed planes
         // apart.
         let count = |queued: Option<Queued>,
@@ -1394,6 +1398,7 @@ impl State {
                 }
                 Err(err) => {
                     backend.quiet = 0;
+                    failed = true;
                     warn!("DRM frame: {err}");
                 }
             }
@@ -1456,15 +1461,24 @@ impl State {
                     extra.pending = queued.is_some();
                     count(queued, &mut drawn, &mut stages, &mut planes);
                 }
-                Err(err) => warn!("DRM frame on {}: {err}", extra.output.name()),
+                Err(err) => {
+                    failed = true;
+                    warn!("DRM frame on {}: {err}", extra.output.name());
+                }
             }
         }
         if let (Some(timer), Some(gles)) = (&mut backend.gpu_timer, backend.renderer.gles()) {
             timer.end(gles, drawn);
             timer.collect(gles, |time| self.perf.gpu_rendered(time));
         }
+        let since_frame = now.saturating_duration_since(backend.last_frame);
         backend.last_frame = now;
         backend.last_dark = dark;
+        // Nothing reached the display: the clients' callbacks wait for the frame tick, or a
+        // client drawing on each callback would spin with the compositor.
+        if failed && !drawn && planes.is_none() && since_frame < IDLE_FRAME {
+            return;
+        }
         if drawn {
             self.perf.rendered(stages);
         } else if let Some(scanout) = planes {

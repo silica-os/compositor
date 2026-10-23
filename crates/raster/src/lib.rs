@@ -383,7 +383,7 @@ impl CpuRenderer {
         let Some(target) = self.targets.iter_mut().find(|t| t.buffer == weak) else {
             return Ok(());
         };
-        let stride = dmabuf_layout(dmabuf)?.1;
+        let stride = dmabuf_layout(dmabuf, true)?.1;
         let mapping = match &mut target.mapping {
             Some(mapping) => mapping,
             mapping => mapping.insert(
@@ -413,13 +413,18 @@ impl CpuRenderer {
     }
 }
 
-/// The layout and stride of a dmabuf the renderer can use.
-fn dmabuf_layout(dmabuf: &Dmabuf) -> Result<(Layout, usize), CpuError> {
+/// The layout and stride of a dmabuf the renderer can use. `implicit` takes an implicit
+/// modifier as linear: only for targets, which the compositor allocates linear
+/// (`GBM_BO_USE_LINEAR`) where the display has no modifiers; a client's buffer with an
+/// implicit modifier may be tiled.
+fn dmabuf_layout(dmabuf: &Dmabuf, implicit: bool) -> Result<(Layout, usize), CpuError> {
     if dmabuf.num_planes() != 1 {
         return Err(CpuError::UnsupportedPlanes(dmabuf.num_planes()));
     }
     let format = dmabuf.format();
-    if format.modifier != Modifier::Linear {
+    let linear =
+        format.modifier == Modifier::Linear || (implicit && format.modifier == Modifier::Invalid);
+    if !linear {
         return Err(CpuError::UnsupportedModifier(format.modifier));
     }
     let layout = Layout::of(format.code).ok_or(CpuError::UnsupportedFormat(format.code))?;
@@ -979,7 +984,7 @@ impl ImportDma for CpuRenderer {
         dmabuf: &Dmabuf,
         damage: Option<&[Rectangle<i32, BufferCoord>]>,
     ) -> Result<CpuTexture, CpuError> {
-        let (layout, stride) = dmabuf_layout(dmabuf)?;
+        let (layout, stride) = dmabuf_layout(dmabuf, false)?;
         let (w, h) = texture_size(dmabuf.size())?;
         let weak = dmabuf.weak();
         let index = match self.imports.iter().position(|i| i.buffer == weak) {
@@ -1033,7 +1038,7 @@ impl ImportDmaWl for CpuRenderer {}
 
 impl Bind<Dmabuf> for CpuRenderer {
     fn bind<'a>(&mut self, target: &'a mut Dmabuf) -> Result<CpuTarget<'a>, CpuError> {
-        let (layout, stride) = dmabuf_layout(target)?;
+        let (layout, stride) = dmabuf_layout(target, true)?;
         let weak = target.weak();
         let shadow = match self.targets.iter().find(|t| t.buffer == weak) {
             Some(entry) => entry.shadow.clone(),
@@ -1180,6 +1185,25 @@ mod tests {
         frame.finish().unwrap().wait().unwrap();
         drop(framebuffer);
         target.read().pixels().to_vec()
+    }
+
+    #[test]
+    fn implicit_modifiers_are_linear_only_on_targets() {
+        let dmabuf = |modifier| {
+            let fd = std::os::fd::OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+            let mut builder = Dmabuf::builder(
+                (4, 2),
+                Fourcc::Argb8888,
+                modifier,
+                smithay::backend::allocator::dmabuf::DmabufFlags::empty(),
+            );
+            builder.add_plane(fd, 0, 0, 16);
+            builder.build().unwrap()
+        };
+        let implicit = dmabuf(Modifier::Invalid);
+        assert!(dmabuf_layout(&implicit, true).is_ok_and(|(_, stride)| stride == 16));
+        assert!(dmabuf_layout(&implicit, false).is_err());
+        assert!(dmabuf_layout(&dmabuf(Modifier::Linear), false).is_ok());
     }
 
     #[test]
