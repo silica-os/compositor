@@ -159,7 +159,7 @@ pub const fn bend_curve(distortion: f32) -> [(f32, f32); 7] {
     ]
 }
 
-static BEND_REGULAR: [(f32, f32); 7] = bend_curve(0.26);
+static BEND_REGULAR: [(f32, f32); 7] = bend_curve(0.30);
 static BEND_CLEAR: [(f32, f32); 7] = bend_curve(0.30);
 
 /// The band of the refraction on a shape whose smaller side is `thickness` points, relative to
@@ -285,9 +285,9 @@ impl Amalfi {
                 saturation: 1.1,
                 brightness: if dark { 1.07 } else { 1.18 },
                 refraction: Refraction {
-                    distortion: 0.26,
-                    depth: 0.32,
-                    chromatic: 0.022,
+                    distortion: 0.30,
+                    depth: 0.35,
+                    chromatic: 0.03,
                 },
                 tint: token(if dark { 0x2A2B3096 } else { 0xFFFFFF80 }),
                 inside_rim,
@@ -713,9 +713,9 @@ mod tests {
             assert_eq!(
                 m.refraction,
                 Refraction {
-                    distortion: 0.26,
-                    depth: 0.32,
-                    chromatic: 0.022
+                    distortion: 0.30,
+                    depth: 0.35,
+                    chromatic: 0.03
                 }
             );
             let tint = if dark {
