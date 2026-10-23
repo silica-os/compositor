@@ -28,6 +28,24 @@ pub trait Effect: Send + Sync + fmt::Debug {
     fn draw(&self, band: &mut Band<'_>, rect: Rect);
 }
 
+/// A texture program: it changes the texels a texture command samples before they are
+/// blended (the CPU twin of a GLES texture-program override: window corners, color filters).
+pub trait Shader: Send + Sync + fmt::Debug {
+    /// Shades `row`, the texels sampled for target pixels `x0..` of target row `y`
+    /// (premultiplied, before the command's alpha).
+    fn shade(&self, y: i32, x0: i32, row: &mut [u32]);
+
+    /// The target rectangles outside which `shade` changes nothing; `None`: everywhere.
+    fn region(&self) -> Option<Vec<Rect>> {
+        None
+    }
+
+    /// Whether an opaque texel stays opaque, so that an opaque texture can still be copied.
+    fn keeps_opaque(&self) -> bool {
+        false
+    }
+}
+
 /// The rows `y0..y0 + rows / width` of the target, for one band's commands.
 pub struct Band<'a> {
     y0: i32,
@@ -79,12 +97,13 @@ pub(crate) enum Op {
     Fill(u32),
     /// A color over.
     FillOver(u32),
-    /// A texture × alpha (0..=255), over or replacing (`copy`).
+    /// A texture, through a shader if any, × alpha (0..=255), over or replacing (`copy`).
     Texture {
         source: usize,
         map: Map,
         alpha: u32,
         copy: bool,
+        shader: Option<Arc<dyn Shader>>,
     },
     Effect(Arc<dyn Effect>),
 }
@@ -219,6 +238,7 @@ impl DisplayList {
                         map,
                         alpha,
                         copy,
+                        shader,
                     } => {
                         let Some(Some(src)) = sources.get(*source) else {
                             continue;
@@ -231,15 +251,29 @@ impl DisplayList {
                             }
                         };
                         match *map {
-                            Map::Offset { dx, dy } => each_row(band, rect, |dst, y| {
-                                if let Some(s) = src.span(y + dy, rect.x0 + dx, rect.x1 + dx) {
-                                    blend(dst, s);
-                                }
-                            }),
+                            Map::Offset { dx, dy } => match shader {
+                                None => each_row(band, rect, |dst, y| {
+                                    if let Some(s) = src.span(y + dy, rect.x0 + dx, rect.x1 + dx) {
+                                        blend(dst, s);
+                                    }
+                                }),
+                                Some(shader) => SCRATCH.with_borrow_mut(|scratch| {
+                                    each_row(band, rect, |dst, y| {
+                                        if let Some(s) =
+                                            src.span(y + dy, rect.x0 + dx, rect.x1 + dx)
+                                        {
+                                            scratch.clear();
+                                            scratch.extend_from_slice(s);
+                                            shader.shade(y, rect.x0, scratch);
+                                            blend(dst, scratch);
+                                        }
+                                    })
+                                }),
+                            },
                             Map::Affine { u, v, filter } => SCRATCH.with_borrow_mut(|scratch| {
                                 scratch.resize(index(rect.width()).unwrap_or(0), 0);
-                                each_row(band, rect, |dst, y| {
-                                    let (x, y) = (f64::from(rect.x0) + 0.5, f64::from(y) + 0.5);
+                                each_row(band, rect, |dst, row| {
+                                    let (x, y) = (f64::from(rect.x0) + 0.5, f64::from(row) + 0.5);
                                     let walk = Walk {
                                         u: fixed(u[0] * x + u[1] * y + u[2]),
                                         v: fixed(v[0] * x + v[1] * y + v[2]),
@@ -254,6 +288,9 @@ impl DisplayList {
                                             sample_nearest(src, walk, scratch)
                                         }
                                     }
+                                    if let Some(shader) = shader {
+                                        shader.shade(row, rect.x0, scratch);
+                                    }
                                     blend(dst, scratch);
                                 });
                             }),
@@ -263,6 +300,35 @@ impl DisplayList {
                 }
             }
         }
+    }
+}
+
+/// Runs `f` on every row of `data` (`width` items per row) with the row's index, in bands on
+/// the workers when there is enough of it.
+pub(crate) fn rows<T: Send>(
+    pool: Option<&ThreadPool>,
+    data: &mut [T],
+    width: usize,
+    f: impl Fn(usize, &mut [T]) + Sync,
+) {
+    if width == 0 {
+        return;
+    }
+    let band = |(i, band): (usize, &mut [T])| {
+        for (j, row) in band.chunks_mut(width).enumerate() {
+            f(i * BAND_ROWS + j, row);
+        }
+    };
+    match pool {
+        Some(pool) if data.len() as u64 >= PARALLEL_PIXELS => pool.install(|| {
+            data.par_chunks_mut(BAND_ROWS * width)
+                .enumerate()
+                .for_each(band);
+        }),
+        _ => data
+            .chunks_mut(BAND_ROWS * width)
+            .enumerate()
+            .for_each(band),
     }
 }
 

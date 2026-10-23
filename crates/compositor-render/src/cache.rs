@@ -3,6 +3,10 @@
 //! needed.
 
 use std::cell::RefCell;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use compositor_raster::{CpuRenderer, CpuTexture};
+use smithay::backend::renderer::Frame;
 
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};
 use smithay::backend::renderer::gles::Uniform;
@@ -10,6 +14,7 @@ use smithay::backend::renderer::utils::{CommitCounter, OpaqueRegions};
 use smithay::utils::{Buffer, Logical, Physical, Rectangle, Scale, Transform};
 
 use crate::Program;
+use crate::cpu::pixel::PixelProgram;
 use crate::renderer::{SilicaError, SilicaFrame, SilicaRenderer};
 
 /// An area drawn by a pixel program from its parameters (the uniforms of the GLSL shader,
@@ -23,6 +28,17 @@ pub struct ShaderElement {
     alpha: f32,
     uniforms: Vec<Uniform<'static>>,
     kind: Kind,
+    /// On the CPU, the program painted once, shared by the clones of the element.
+    painted: Arc<Mutex<Option<Painted>>>,
+}
+
+/// A pixel program painted into a texture, and what it was painted for.
+#[derive(Debug)]
+struct Painted {
+    commit: CommitCounter,
+    src: Rectangle<f64, Buffer>,
+    size: smithay::utils::Size<i32, Physical>,
+    texture: CpuTexture,
 }
 
 impl ShaderElement {
@@ -41,7 +57,51 @@ impl ShaderElement {
             alpha,
             uniforms,
             kind,
+            painted: Arc::default(),
         }
+    }
+
+    /// The program painted over `src` at `size` pixels: kept while the element and the size do
+    /// not change.
+    fn painted(
+        &self,
+        renderer: &CpuRenderer,
+        src: Rectangle<f64, Buffer>,
+        size: smithay::utils::Size<i32, Physical>,
+    ) -> Option<CpuTexture> {
+        let mut painted = self.painted.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(p) = painted.as_ref()
+            && p.commit == self.commit
+            && p.src == src
+            && p.size == size
+        {
+            return Some(p.texture.clone());
+        }
+        let program = PixelProgram::new(self.program, &self.uniforms)?;
+        let texture = CpuTexture::new(
+            u32::try_from(size.w).ok()?,
+            u32::try_from(size.h).ok()?,
+            smithay::backend::allocator::Fourcc::Argb8888,
+        )
+        .ok()?;
+        program.paint(
+            renderer,
+            [self.area.size.w as f32, self.area.size.h as f32],
+            [
+                src.loc.x as f32,
+                src.loc.y as f32,
+                src.size.w as f32,
+                src.size.h as f32,
+            ],
+            &mut texture.write(),
+        );
+        *painted = Some(Painted {
+            commit: self.commit,
+            src,
+            size,
+            texture: texture.clone(),
+        });
+        Some(texture)
     }
 
     pub fn resize(&mut self, area: Rectangle<i32, Logical>) {
@@ -113,8 +173,24 @@ impl RenderElement<SilicaRenderer> for ShaderElement {
                     &self.uniforms,
                 )?)
             }
-            // No CPU program yet: `shaders` reports it missing, so no element is made.
-            SilicaFrame::Cpu(_) => Ok(()),
+            // Painted once into a texture, then composited.
+            SilicaFrame::Cpu(frame) => {
+                let Some(texture) = self.painted(frame.renderer(), src, dst.size) else {
+                    return Ok(());
+                };
+                let whole = Rectangle::from_size(
+                    smithay::utils::Size::<i32, Buffer>::from((dst.size.w, dst.size.h)).to_f64(),
+                );
+                Ok(frame.render_texture_from_to(
+                    &texture,
+                    whole,
+                    dst,
+                    damage,
+                    &[],
+                    Transform::Normal,
+                    self.alpha,
+                )?)
+            }
         }
     }
 

@@ -33,14 +33,14 @@ use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform}
 
 /// An RGBA image, 8 bits per channel, opaque.
 #[derive(Clone, PartialEq)]
-struct Image {
-    w: i32,
-    h: i32,
-    rgba: Vec<u8>,
+pub(super) struct Image {
+    pub(super) w: i32,
+    pub(super) h: i32,
+    pub(super) rgba: Vec<u8>,
 }
 
 impl Image {
-    fn from_fn(w: i32, h: i32, f: impl Fn(f64, f64) -> [f64; 3]) -> Self {
+    pub(super) fn from_fn(w: i32, h: i32, f: impl Fn(f64, f64) -> [f64; 3]) -> Self {
         let mut rgba = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             for x in 0..w {
@@ -54,7 +54,7 @@ impl Image {
         Self { w, h, rgba }
     }
 
-    fn size(&self) -> Size<i32, Physical> {
+    pub(super) fn size(&self) -> Size<i32, Physical> {
         Size::from((self.w, self.h))
     }
 }
@@ -86,7 +86,7 @@ fn noise(x: f64, y: f64, seed: i64) -> f64 {
 
 /// The backdrops, `w` × `h` pixels at `scale` (the patterns are in points, the edges and
 /// strokes in whole pixels as on screen).
-fn backdrops(w: i32, h: i32, scale: f64) -> Vec<(String, Image)> {
+pub(super) fn backdrops(w: i32, h: i32, scale: f64) -> Vec<(String, Image)> {
     let mut out = Vec::new();
     // A soft multicolour wallpaper (like the default ones).
     out.push((
@@ -210,7 +210,7 @@ fn backdrops(w: i32, h: i32, scale: f64) -> Vec<(String, Image)> {
 // A test element: a texture whose id, commit, place, alpha and damage the test controls
 
 #[derive(Clone)]
-struct Layer {
+pub(super) struct Layer {
     id: Id,
     commit: CommitCounter,
     /// The commit before `commit` and what it damaged (relative to the element).
@@ -222,7 +222,11 @@ struct Layer {
 }
 
 impl Layer {
-    fn new(renderer: &mut SilicaRenderer, image: Image, at: Point<i32, Physical>) -> Self {
+    pub(super) fn new(
+        renderer: &mut SilicaRenderer,
+        image: Image,
+        at: Point<i32, Physical>,
+    ) -> Self {
         let texture = import(renderer, &image);
         Self {
             id: Id::new(),
@@ -251,7 +255,7 @@ impl Layer {
     }
 }
 
-fn import(renderer: &mut SilicaRenderer, image: &Image) -> SilicaTexture {
+pub(super) fn import(renderer: &mut SilicaRenderer, image: &Image) -> SilicaTexture {
     renderer
         .import_memory(
             &image.rgba,
@@ -329,13 +333,13 @@ impl RenderElement<SilicaRenderer> for Layer {
 // ---------------------------------------------------------------------------------------------
 // Drawing and reading back
 
-struct Gpu {
-    renderer: SilicaRenderer,
+pub(super) struct Gpu {
+    pub(super) renderer: SilicaRenderer,
     /// The backdrops made so far, by scale (bits).
     backdrops: Vec<(u64, Vec<(String, Image)>)>,
 }
 
-fn gpu() -> Gpu {
+pub(super) fn gpu() -> Gpu {
     let renderer = crate::egl::headless_renderer(false).expect("headless GLES renderer");
     Gpu {
         renderer: renderer.into(),
@@ -423,7 +427,7 @@ fn frame(
 }
 
 /// Mean and max absolute difference per channel (levels), the mean over `area`.
-fn difference(a: &Image, b: &Image, area: Rectangle<i32, Physical>) -> (f64, u8) {
+pub(super) fn difference(a: &Image, b: &Image, area: Rectangle<i32, Physical>) -> (f64, u8) {
     assert_eq!((a.w, a.h), (b.w, b.h));
     let mut max = 0u8;
     for (x, y) in a.rgba.iter().zip(&b.rgba) {
@@ -442,7 +446,7 @@ fn difference(a: &Image, b: &Image, area: Rectangle<i32, Physical>) -> (f64, u8)
     (sum as f64 / count.max(1) as f64, max)
 }
 
-fn save(image: &Image, path: &std::path::Path) {
+pub(super) fn save(image: &Image, path: &std::path::Path) {
     let file = std::fs::File::create(path).unwrap();
     let mut encoder = png::Encoder::new(
         std::io::BufWriter::new(file),
@@ -469,8 +473,8 @@ const RADIUS_PT: f64 = 22.0;
 /// The scales tested: 1× (where σ in pixels is the smallest), a fractional one, and 2×.
 const SCALES: [f64; 3] = [1.0, 1.5, 2.0];
 /// The thresholds of #204, in levels.
-const MAX_MEAN: f64 = 1.0;
-const MAX_ANY: u8 = 3;
+pub(super) const MAX_MEAN: f64 = 1.0;
+pub(super) const MAX_ANY: u8 = 3;
 
 /// A glass kind as the compositor draws it: its Amalfi profile and material in an appearance.
 struct Case {
@@ -651,6 +655,72 @@ fn table_of_factors() {
             eprintln!("{row}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The CPU renderer against GLES
+
+/// Every kind, light and dark, at 1× and 2× with its own blur scale: the CPU renderer draws
+/// the glass within the thresholds of GLES over every backdrop.
+#[test]
+fn the_cpu_draws_every_kind_like_gles() {
+    let mut gpu = gpu();
+    let mut cpu = Gpu {
+        renderer: SilicaRenderer::Cpu(compositor_raster::CpuRenderer::new()),
+        backdrops: Vec::new(),
+    };
+    let out = std::env::var("GLASS_EQUIVALENCE_OUT")
+        .ok()
+        .map(std::path::PathBuf::from);
+    if let Some(dir) = &out {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let clear = [0.0, 0.0, 0.0, 1.0];
+    let mut failures = Vec::new();
+    for case in cases() {
+        for scale in [1.0, 2.0] {
+            let size = Size::from((px(CANVAS_PT.0, scale), px(CANVAS_PT.1, scale)));
+            let glass = region(&case, scale, case.profile.blur_scale);
+            let mut worst = (0.0_f64, 0u8, String::new());
+            for (name, image) in backdrops_at(&mut gpu, scale) {
+                let at = Point::from((0, 0));
+                let gles_layers = [Layer::new(&mut gpu.renderer, image.clone(), at)];
+                let cpu_layers = [Layer::new(&mut cpu.renderer, image, at)];
+                let cache = GlassCache::default();
+                let (a, _) = frame(&mut gpu, &cache, &[glass], &gles_layers, size, scale, clear);
+                let cache = GlassCache::default();
+                let (b, _) = frame(&mut cpu, &cache, &[glass], &cpu_layers, size, scale, clear);
+                let (mean, max) = difference(&a, &b, glass.rect);
+                if max > worst.1
+                    && let Some(dir) = &out
+                {
+                    let stem = format!("{}-{scale}x", case.name);
+                    save(&a, &dir.join(format!("{stem}-gles.png")));
+                    save(&b, &dir.join(format!("{stem}-cpu.png")));
+                }
+                if max > worst.1 {
+                    worst.2 = name;
+                }
+                worst.0 = worst.0.max(mean);
+                worst.1 = worst.1.max(max);
+            }
+            let (mean, max, at) = &worst;
+            eprintln!(
+                "{:<22} {scale}×: mean {mean:.3}, max {max} ({at})",
+                case.name
+            );
+            if *mean > MAX_MEAN || *max > MAX_ANY {
+                failures.push(format!(
+                    "{} {scale}×: mean {mean:.3}, max {max} ({at})",
+                    case.name
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the CPU differs from GLES: {failures:#?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

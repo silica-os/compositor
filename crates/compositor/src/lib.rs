@@ -9,6 +9,8 @@ mod capture;
 pub mod commands;
 mod config;
 mod control;
+#[cfg(test)]
+mod cpu_equivalence;
 #[cfg(feature = "drm")]
 mod cursor;
 mod cursor_theme;

@@ -118,6 +118,12 @@ impl Backdrop {
                         return Err(err);
                     }
                 };
+                // On the CPU the tone is applied once, here; GLES applies it while drawing.
+                if let (SilicaRenderer::Cpu(cpu), SilicaTexture::Cpu(texture)) =
+                    (&*renderer, &texture)
+                {
+                    crate::cpu::shade::tone(cpu, &mut texture.write(), &TABLE, scale);
+                }
                 let (id, mut commit) = previous.map_or_else(
                     || (Id::new(), CommitCounter::default()),
                     |(.., id, commit)| (id, commit),
@@ -196,10 +202,21 @@ impl RenderElement<SilicaRenderer> for ToneElement {
         damage: &[Rectangle<i32, Physical>],
         opaque_regions: &[Rectangle<i32, Physical>],
     ) -> Result<(), SilicaError> {
-        let (SilicaFrame::Gles(frame), SilicaTexture::Gles(texture)) = (frame, &self.texture)
-        else {
-            // No CPU program yet: `shaders` reports it missing, so no element is made.
-            return Ok(());
+        let (frame, texture) = match (frame, &self.texture) {
+            (SilicaFrame::Gles(frame), SilicaTexture::Gles(texture)) => (frame, texture),
+            // The tone is already in the texture (`Backdrop::element`).
+            (SilicaFrame::Cpu(frame), SilicaTexture::Cpu(texture)) => {
+                return Ok(frame.render_texture_from_to(
+                    texture,
+                    src,
+                    dst,
+                    damage,
+                    opaque_regions,
+                    Transform::Normal,
+                    1.0,
+                )?);
+            }
+            _ => return Err(SilicaError::Mismatch),
         };
         let Some(program) = crate::frame_programs(frame).and_then(|p| p.texture(self.program))
         else {

@@ -15,8 +15,11 @@ use smithay::backend::renderer::gles::{Uniform, UniformType, UniformValue};
 use smithay::backend::renderer::utils::{CommitCounter, OpaqueRegions};
 use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform};
 
+use std::sync::Arc;
+
 use crate::Program;
 use crate::animation::GenieShape;
+use crate::cpu::shade::Genie;
 use crate::renderer::{SilicaError, SilicaFrame, SilicaRenderer, SilicaTexture};
 
 pub const SHADER: &str = include_str!("shaders/genie.frag");
@@ -35,6 +38,8 @@ pub struct GenieElement {
     id: Id,
     commit: CommitCounter,
     inner: TextureRenderElement<SilicaTexture>,
+    /// The texture of `inner`, which the CPU samples itself.
+    snapshot: SilicaTexture,
     /// The effect area in the output: frame and thumbnail together.
     area: Rectangle<i32, Physical>,
     window: Rectangle<f64, Physical>,
@@ -89,6 +94,7 @@ impl GenieElement {
             frame_uv[1] = 1.0 - frame_uv[1];
             frame_uv[3] = -frame_uv[3];
         }
+        let snapshot = parts.texture.clone();
         let inner = TextureRenderElement::from_static_texture(
             Id::new(),
             parts.context_id,
@@ -107,6 +113,7 @@ impl GenieElement {
             id: parts.id,
             commit: parts.commit,
             inner,
+            snapshot,
             area,
             window: local(parts.window),
             target: local(parts.target),
@@ -195,8 +202,26 @@ impl RenderElement<SilicaRenderer> for GenieElement {
     ) -> Result<(), SilicaError> {
         // Without the program no genie: the window disappears right away (never a stretched
         // texture).
-        let (Some(program), SilicaFrame::Gles(gles)) = (self.program, &mut *frame) else {
+        let Some(program) = self.program else {
             return Ok(());
+        };
+        let gles = match &mut *frame {
+            SilicaFrame::Gles(gles) => gles,
+            SilicaFrame::Cpu(cpu) => {
+                let SilicaTexture::Cpu(snapshot) = &self.snapshot else {
+                    return Err(SilicaError::Mismatch);
+                };
+                // In the target's pixels, from where the frame draws the area.
+                let genie = Genie::new(
+                    snapshot.clone(),
+                    [f64::from(dst.loc.x), f64::from(dst.loc.y)],
+                    &self.uniforms(Transform::Normal, Point::default()),
+                    1.0,
+                );
+                // Not on a rotated output: no genie there, as without the program.
+                let _ = cpu.draw_effect(Arc::new(genie), dst, damage);
+                return Ok(());
+            }
         };
         let Some(texture) = crate::frame_programs(gles).and_then(|p| p.texture(program)) else {
             return Ok(());

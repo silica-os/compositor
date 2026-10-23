@@ -13,7 +13,10 @@ use smithay::backend::renderer::gles::Uniform;
 use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
 use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Transform};
 
+use std::sync::Arc;
+
 use crate::Program;
+use crate::cpu::shade::Filter;
 use crate::renderer::{SilicaError, SilicaFrame, SilicaRenderer, SilicaTexture};
 
 /// The whole frame, drawn through the filter program.
@@ -95,15 +98,21 @@ impl RenderElement<SilicaRenderer> for FilterElement {
         damage: &[Rectangle<i32, Physical>],
         opaque_regions: &[Rectangle<i32, Physical>],
     ) -> Result<(), SilicaError> {
-        // No CPU program yet: `shaders` reports it missing, so no element is made.
-        let SilicaFrame::Gles(gles) = &mut *frame else {
-            return Ok(());
+        let overridden = match &mut *frame {
+            SilicaFrame::Gles(gles) => {
+                let Some(program) =
+                    crate::frame_programs(gles).and_then(|p| p.texture(self.program))
+                else {
+                    return Ok(());
+                };
+                gles.override_default_tex_program(program.clone(), self.uniforms.clone());
+                true
+            }
+            // Not on a rotated output: the colors stay unfiltered there.
+            SilicaFrame::Cpu(cpu) => cpu
+                .override_shader(Arc::new(Filter::new(&self.uniforms)))
+                .is_ok(),
         };
-        let Some(program) = crate::frame_programs(gles).and_then(|p| p.texture(self.program))
-        else {
-            return Ok(());
-        };
-        gles.override_default_tex_program(program.clone(), self.uniforms.clone());
         let result = RenderElement::<SilicaRenderer>::draw(
             &self.inner,
             frame,
@@ -112,8 +121,11 @@ impl RenderElement<SilicaRenderer> for FilterElement {
             damage,
             opaque_regions,
         );
-        if let SilicaFrame::Gles(gles) = frame {
-            gles.clear_tex_program_override();
+        if overridden {
+            match frame {
+                SilicaFrame::Gles(gles) => gles.clear_tex_program_override(),
+                SilicaFrame::Cpu(cpu) => cpu.clear_shader(),
+            }
         }
         result
     }

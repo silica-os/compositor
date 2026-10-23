@@ -10,6 +10,7 @@ pub mod backdrop;
 pub mod border;
 pub mod cache;
 pub mod corners;
+mod cpu;
 pub mod filter;
 pub mod genie;
 pub mod glass;
@@ -64,7 +65,17 @@ pub struct Shaders {
 pub fn shaders(renderer: &mut SilicaRenderer) -> Shaders {
     match renderer {
         SilicaRenderer::Gles(renderer) => gles_programs(renderer).available(),
-        SilicaRenderer::Cpu(_) => Shaders::default(),
+        // Every effect is ported (`cpu`).
+        SilicaRenderer::Cpu(_) => Shaders {
+            corners: Some(Program::Corners),
+            shadow: Some(Program::Shadow),
+            titlebar: Some(Program::Titlebar),
+            border: Some(Program::Border),
+            glass: Some(Program::Glass),
+            tone: Some(Program::Tone),
+            genie: Some(Program::Genie),
+            filter: Some(Program::Filter),
+        },
     }
 }
 

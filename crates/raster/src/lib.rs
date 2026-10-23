@@ -31,7 +31,7 @@ use smithay::utils::{Buffer as BufferCoord, Physical, Point, Rectangle, Size, Tr
 use smithay::wayland::compositor::SurfaceData;
 use smithay::wayland::shm::{BufferAccessError, shm_format_to_fourcc};
 
-pub use exec::{Band, Effect};
+pub use exec::{Band, Effect, Shader};
 pub use image::{FORMATS, Image, Layout, Rect};
 pub use kernels::Kernels;
 
@@ -69,6 +69,22 @@ impl CpuTexture {
         Self::with(width, height, format, false)
     }
 
+    /// A texture holding `image` (premultiplied ARGB, as every texture keeps it).
+    pub fn from_image(image: Image) -> Result<Self, CpuError> {
+        let (width, height) = (image.width(), image.height());
+        if width == 0 || height == 0 || width > i32::MAX as usize || height > i32::MAX as usize {
+            return Err(CpuError::InvalidSize);
+        }
+        Ok(Self(Arc::new(TextureInner {
+            image: RwLock::new(image),
+            width: width as u32,
+            height: height as u32,
+            format: Fourcc::Argb8888,
+            opaque: false,
+            flipped: false,
+        })))
+    }
+
     fn with(width: u32, height: u32, format: Fourcc, flipped: bool) -> Result<Self, CpuError> {
         let layout = Layout::of(format).ok_or(CpuError::UnsupportedFormat(format))?;
         if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
@@ -87,6 +103,16 @@ impl CpuTexture {
     /// The pixels, for reading.
     pub fn read(&self) -> RwLockReadGuard<'_, Image> {
         self.0.image.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The pixels, for reading, unless someone is writing them (a texture drawn into its own
+    /// frame).
+    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, Image>> {
+        match self.0.image.try_read() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
     }
 
     /// The pixels, for writing.
@@ -317,6 +343,12 @@ impl CpuRenderer {
         }
     }
 
+    /// Runs `f` on every row of `data` (`width` items per row) with the row's index, on the
+    /// workers when there is enough of it: the effects' own passes.
+    pub fn rows<T: Send>(&self, data: &mut [T], width: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+        exec::rows(self.pool.as_ref(), data, width, f);
+    }
+
     /// The threads a large frame runs on.
     pub fn threads(&self) -> usize {
         self.pool
@@ -462,6 +494,7 @@ impl Renderer for CpuRenderer {
             space: dst_transform.transform_size(output_size),
             bounds,
             list,
+            shader: None,
             finished: false,
         })
     }
@@ -486,6 +519,8 @@ pub struct CpuFrame<'frame, 'buffer> {
     /// The target's pixels.
     bounds: Rect,
     list: DisplayList,
+    /// The texture program of the textures drawn now, if any.
+    shader: Option<Arc<dyn Shader>>,
     finished: bool,
 }
 
@@ -621,6 +656,26 @@ impl CpuFrame<'_, '_> {
         })
     }
 
+    /// The renderer drawing the frame, for an effect painted while drawing.
+    pub fn renderer(&self) -> &CpuRenderer {
+        self.renderer
+    }
+
+    /// Shades the textures drawn from now on with `shader`, until `clear_shader` (GLES's
+    /// texture-program override). Shaders work in target pixels, so only on outputs with the
+    /// normal transform.
+    pub fn override_shader(&mut self, shader: Arc<dyn Shader>) -> Result<(), CpuError> {
+        if self.transform != Transform::Normal {
+            return Err(CpuError::UnsupportedTransform(self.transform));
+        }
+        self.shader = Some(shader);
+        Ok(())
+    }
+
+    pub fn clear_shader(&mut self) {
+        self.shader = None;
+    }
+
     /// Draws `effect` over the `damage` of `dst` (as in `draw_solid`). Effects draw in target
     /// pixels, so only on outputs with the normal transform.
     pub fn draw_effect(
@@ -731,16 +786,37 @@ impl Frame for CpuFrame<'_, '_> {
                 .collect::<Vec<Rect>>()
         };
         let source = self.list.source(texture);
-        let op = |copy| Op::Texture {
+        let op = |copy, shader| Op::Texture {
             source,
             map,
             alpha,
             copy,
+            shader,
         };
-        let damage = damage_in(dst, damage);
+        let mut damage: Vec<Rectangle<i32, Physical>> = damage_in(dst, damage).collect();
+        if let Some(shader) = self.shader.clone() {
+            // The shader runs only where it changes something; the rest is drawn as usual.
+            let shaded = match shader.region() {
+                None => std::mem::take(&mut damage),
+                Some(region) => {
+                    let region: Vec<Rectangle<i32, Physical>> =
+                        region.into_iter().map(Rect::to_rectangle).collect();
+                    let shaded = damage
+                        .iter()
+                        .flat_map(|d| region.iter().filter_map(|r| d.intersection(*r)))
+                        .collect();
+                    damage = Rectangle::subtract_rects_many(damage, region);
+                    shaded
+                }
+            };
+            let copy = alpha == 255 && texture.is_opaque() && shader.keeps_opaque();
+            let rects = target(self, &mut shaded.into_iter());
+            self.list.push(op(copy, Some(shader)), rects);
+        }
+        let damage = damage.into_iter();
         if alpha == 255 && texture.is_opaque() {
             let rects = target(self, &mut damage.clone());
-            self.list.push(op(true), rects);
+            self.list.push(op(true, None), rects);
         } else if alpha == 255 && !opaque_regions.is_empty() {
             // As GLES: blend outside the opaque regions, copy inside.
             let opaque = opaque_regions.iter().map(|r| {
@@ -751,12 +827,12 @@ impl Frame for CpuFrame<'_, '_> {
             let blended = Rectangle::subtract_rects_many(damage.clone(), opaque);
             let copied = Rectangle::subtract_rects_many(damage, blended.iter().copied());
             let rects = target(self, &mut blended.into_iter());
-            self.list.push(op(false), rects);
+            self.list.push(op(false, None), rects);
             let rects = target(self, &mut copied.into_iter());
-            self.list.push(op(true), rects);
+            self.list.push(op(true, None), rects);
         } else {
             let rects = target(self, &mut damage.clone());
-            self.list.push(op(false), rects);
+            self.list.push(op(false, None), rects);
         }
         Ok(())
     }

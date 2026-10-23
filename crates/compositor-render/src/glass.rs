@@ -19,7 +19,9 @@ use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{Bind, Frame, Offscreen, Renderer};
 use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform};
 
+use crate::cpu::material::{Material, Plan};
 use crate::renderer::{SilicaError, SilicaFrame, SilicaRenderer, SilicaTexture};
+use compositor_raster::{CpuRenderer, CpuTexture};
 
 use crate::glass_profile::{GlassProfile, lens_width, refraction_band};
 
@@ -781,6 +783,62 @@ struct Cached {
     textures: Vec<(BlurKey, SilicaTexture)>,
     ids: Vec<Id>,
     commit: CommitCounter,
+    /// On the CPU, the material of each group.
+    materials: Vec<CpuMaterial>,
+}
+
+/// The material of a group on the CPU: its geometry while the shapes stay, painted over the
+/// blurred texture until that changes.
+struct CpuMaterial {
+    shapes: Vec<PhysicalRegion>,
+    fallback: bool,
+    plan: Plan,
+    painted: Option<SilicaTexture>,
+}
+
+/// The material of the group `shapes` on the CPU (`material.frag` run once): from `cache` if it
+/// holds the same shapes, else made; kept in `used`.
+#[allow(clippy::too_many_arguments)]
+fn cpu_material(
+    renderer: &CpuRenderer,
+    cache: &mut Vec<CpuMaterial>,
+    used: &mut Vec<CpuMaterial>,
+    shapes: &[PhysicalRegion],
+    bbox: Rectangle<i32, Physical>,
+    area: Rectangle<i32, Physical>,
+    fallback: bool,
+    blurred: &CpuTexture,
+) -> Result<SilicaTexture, SilicaError> {
+    let found = cache.iter().position(|m| {
+        m.fallback == fallback
+            && m.shapes.len() == shapes.len()
+            && m.shapes.iter().zip(shapes).all(|(a, b)| a.same_shape(b))
+    });
+    let mut entry = match found {
+        Some(i) => cache.swap_remove(i),
+        None => {
+            let material = Material::new(&material_uniforms(shapes, bbox, fallback));
+            let origin = area.loc - bbox.loc;
+            let size = (area.size.w.max(0) as usize, area.size.h.max(0) as usize);
+            CpuMaterial {
+                shapes: shapes.to_vec(),
+                fallback,
+                plan: Plan::new(renderer, material, [origin.x, origin.y], size),
+                painted: None,
+            }
+        }
+    };
+    let texture = match &entry.painted {
+        Some(texture) => texture.clone(),
+        None => {
+            let image = entry.plan.paint(renderer, &blurred.read());
+            let texture = SilicaTexture::Cpu(CpuTexture::from_image(image)?);
+            entry.painted = Some(texture.clone());
+            texture
+        }
+    };
+    used.push(entry);
+    Ok(texture)
 }
 
 /// The glass programs.
@@ -885,12 +943,32 @@ impl GlassCache {
                 textures.push((key, blurred));
             }
             let count = groups(regions).len();
-            let (ids, mut commit) = match state.take() {
-                Some(cached) if cached.ids.len() == count => (cached.ids, cached.commit),
-                Some(cached) => ((0..count).map(|_| Id::new()).collect(), cached.commit),
+            // The CPU materials keep their geometry, to be painted over the new textures.
+            let kept = |cached: &mut Cached| {
+                let mut materials = std::mem::take(&mut cached.materials);
+                materials.retain(|_| cached.bbox == bbox);
+                for material in &mut materials {
+                    material.painted = None;
+                }
+                materials
+            };
+            let (ids, mut commit, materials) = match state.take() {
+                Some(mut cached) if cached.ids.len() == count => {
+                    let materials = kept(&mut cached);
+                    (cached.ids, cached.commit, materials)
+                }
+                Some(mut cached) => {
+                    let materials = kept(&mut cached);
+                    (
+                        (0..count).map(|_| Id::new()).collect(),
+                        cached.commit,
+                        materials,
+                    )
+                }
                 None => (
                     (0..count).map(|_| Id::new()).collect(),
                     CommitCounter::default(),
+                    Vec::new(),
                 ),
             };
             commit.increment();
@@ -904,40 +982,68 @@ impl GlassCache {
                 textures,
                 ids,
                 commit,
+                materials,
             });
         }
-        let Some(cached) = state.as_ref() else {
+        let Some(cached) = state.as_mut() else {
             return Ok(Vec::new());
         };
-        Ok(groups(&cached.regions)
-            .into_iter()
-            .zip(&cached.ids)
-            .filter_map(|(shapes, id)| {
-                let key = shapes.first()?.blur_key();
-                let texture = cached.textures.iter().find(|(k, _)| *k == key)?.1.clone();
-                // The smooth union goes out of the regions by at most k / 4 = merge_pt / 2,
-                // the shadow by its reach.
-                let bulge = shapes.first()?.bleed();
-                let area = shapes
-                    .iter()
-                    .map(PhysicalRegion::bounds)
-                    .reduce(|a, b| a.merge(b))?;
-                let area = Rectangle::new(
-                    area.loc - Point::from((bulge, bulge)),
-                    area.size + Size::from((bulge.saturating_mul(2), bulge.saturating_mul(2))),
-                )
-                .intersection(cached.bbox)?;
-                Some(GlassElement {
-                    id: id.clone(),
-                    commit: cached.commit,
-                    texture,
-                    bbox: cached.bbox,
-                    area,
-                    shapes,
-                    fallback: cached.quality == GlassQuality::Opaque,
+        let fallback = cached.quality == GlassQuality::Opaque;
+        let mut cache = std::mem::take(&mut cached.materials);
+        let mut used = Vec::new();
+        let mut elements = Vec::new();
+        for (shapes, id) in groups(&cached.regions).into_iter().zip(&cached.ids) {
+            let Some(first) = shapes.first() else {
+                continue;
+            };
+            let key = first.blur_key();
+            let Some((_, texture)) = cached.textures.iter().find(|(k, _)| *k == key) else {
+                continue;
+            };
+            // The smooth union goes out of the regions by at most k / 4 = merge_pt / 2, the
+            // shadow by its reach.
+            let bulge = first.bleed();
+            let Some(area) = shapes
+                .iter()
+                .map(PhysicalRegion::bounds)
+                .reduce(|a, b| a.merge(b))
+                .and_then(|area| {
+                    Rectangle::new(
+                        area.loc - Point::from((bulge, bulge)),
+                        area.size + Size::from((bulge.saturating_mul(2), bulge.saturating_mul(2))),
+                    )
+                    .intersection(cached.bbox)
                 })
-            })
-            .collect())
+                .filter(|area| !area.is_empty())
+            else {
+                continue;
+            };
+            let material = match (&*renderer, texture) {
+                (SilicaRenderer::Cpu(cpu), SilicaTexture::Cpu(blurred)) => Some(cpu_material(
+                    cpu,
+                    &mut cache,
+                    &mut used,
+                    &shapes,
+                    cached.bbox,
+                    area,
+                    fallback,
+                    blurred,
+                )?),
+                _ => None,
+            };
+            elements.push(GlassElement {
+                id: id.clone(),
+                commit: cached.commit,
+                texture: texture.clone(),
+                bbox: cached.bbox,
+                area,
+                shapes,
+                fallback,
+                material,
+            });
+        }
+        cached.materials = used;
+        Ok(elements)
     }
 }
 
@@ -1153,7 +1259,7 @@ pub fn effective_factor(sigma: f64, factor: u32) -> u32 {
 /// (f² − 1) / 12 pixels² of variance, the bilinear upsampling f² / 4 − (f² − 1) / 12 on
 /// average over the phases: f² / 4 together, taken out of σ² so that the total spread is the
 /// full-resolution one.
-fn reduced_sigma(sigma: f64, factor: u32) -> f64 {
+pub(crate) fn reduced_sigma(sigma: f64, factor: u32) -> f64 {
     if factor <= 1 {
         return sigma;
     }
@@ -1325,8 +1431,16 @@ fn blur_with(
                 renderer, &programs, sharp, size, key, scale,
             )?))
         }
-        (SilicaRenderer::Cpu(_), SilicaTexture::Cpu(_)) => {
-            Err(SilicaError::Unsupported("glass on the CPU"))
+        (SilicaRenderer::Cpu(renderer), SilicaTexture::Cpu(sharp)) => {
+            let image = crate::cpu::blur::blur(
+                renderer,
+                &sharp.read(),
+                key.sigma * scale,
+                key.factor,
+                key.sharp,
+                BlurEdge::Clamp,
+            );
+            Ok(SilicaTexture::Cpu(CpuTexture::from_image(image)?))
         }
         _ => Err(SilicaError::Mismatch),
     }
@@ -1380,6 +1494,8 @@ pub struct GlassElement {
     shapes: Vec<PhysicalRegion>,
     /// No blur (the opaque quality level): the tint over the profile's fallback surface.
     fallback: bool,
+    /// On the CPU, the material painted over `texture`, as large as `area`.
+    material: Option<SilicaTexture>,
 }
 
 impl Element for GlassElement {
@@ -1420,216 +1536,250 @@ impl RenderElement<SilicaRenderer> for GlassElement {
         let Some(first) = self.shapes.first() else {
             return Ok(());
         };
-        // No CPU program yet: `shaders` reports the glass missing, so no element is made.
-        let (SilicaFrame::Gles(frame), SilicaTexture::Gles(texture)) = (frame, &self.texture)
-        else {
-            return Ok(());
-        };
-        let Some(program) = crate::frame_programs(frame)
-            .and_then(|p| p.glass.as_ref())
-            .map(|glass| glass.material.clone())
-        else {
-            return Ok(());
-        };
-        let m = first.material.matrix;
-        let b = first.material.offset;
-        let [q2, q3] = first.material.curve;
-        let lens = first.material.lens;
-        let edge = first.material.edge;
-        let profile = first.profile;
-        let px = first.scale as f32;
-        // The deepest the lens samples, for its width on each shape (`lens_width`).
-        let lens_reach_px = lens.inward_reach() * px;
-        let mut lens_widths = [profile.falloff; 16];
-        // The regions relative to the texture: up to 8 rectangles in two mat4 (one column per
-        // rectangle: x, y, width, height) and the radii in a mat4.
-        let mut rects = [[0.0_f32; 16]; 2];
-        let mut radii = [0.0_f32; 16];
-        // The tips' outlines (TIP-01), one column per region: half base, tan(angle), apex and
-        // fillet radii in pixels.
-        let mut tips = [[0.0_f32; 16]; 2];
-        // Each region's rotation about its centre, (cos, sin) two per column: region 2j in
-        // xy, 2j + 1 in zw.
-        let mut rotations = [0.0_f32; 16];
-        for (i, shape) in self.shapes.iter().take(MAX_SHAPES).enumerate() {
-            let (sin, cos) = shape.rotation.sin_cos();
-            let at = (i / 2) * 4 + (i % 2) * 2;
-            if let Some(slot) = rotations.get_mut(at..at + 2) {
-                slot.copy_from_slice(&[cos as f32, sin as f32]);
+        let opacity = first.opacity.clamp(0.0, 1.0);
+        match (frame, &self.texture) {
+            (SilicaFrame::Gles(frame), SilicaTexture::Gles(texture)) => {
+                let Some(program) = crate::frame_programs(frame)
+                    .and_then(|p| p.glass.as_ref())
+                    .map(|glass| glass.material.clone())
+                else {
+                    return Ok(());
+                };
+                let uniforms = material_uniforms(&self.shapes, self.bbox, self.fallback);
+                Ok(frame.render_texture_from_to(
+                    texture,
+                    src,
+                    dst,
+                    damage,
+                    opaque_regions,
+                    Transform::Normal,
+                    opacity,
+                    Some(&program),
+                    &uniforms,
+                )?)
             }
-            let local = shape.rect.loc - self.bbox.loc;
-            let values = [
-                local.x as f32,
-                local.y as f32,
-                shape.rect.size.w as f32,
-                shape.rect.size.h as f32,
-            ];
-            if let Some(slot) = rects
+            (SilicaFrame::Cpu(frame), SilicaTexture::Cpu(_)) => {
+                // The material painted by `GlassCache::elements`, as large as `area`.
+                let Some(SilicaTexture::Cpu(material)) = &self.material else {
+                    return Ok(());
+                };
+                let shift = self.area.loc - self.bbox.loc;
+                let src = Rectangle::new(
+                    src.loc - Point::from((f64::from(shift.x), f64::from(shift.y))),
+                    src.size,
+                );
+                Ok(frame.render_texture_from_to(
+                    material,
+                    src,
+                    dst,
+                    damage,
+                    opaque_regions,
+                    Transform::Normal,
+                    opacity,
+                )?)
+            }
+            _ => Err(SilicaError::Mismatch),
+        }
+    }
+}
+
+/// The uniforms of `material.frag` for a group of regions (`shapes`, not empty) over the
+/// blurred texture of `bbox`; `fallback`: no blur, the profile's fallback surface instead.
+fn material_uniforms(
+    shapes: &[PhysicalRegion],
+    bbox: Rectangle<i32, Physical>,
+    fallback: bool,
+) -> Vec<Uniform<'static>> {
+    let Some(first) = shapes.first() else {
+        return Vec::new();
+    };
+    let m = first.material.matrix;
+    let b = first.material.offset;
+    let [q2, q3] = first.material.curve;
+    let lens = first.material.lens;
+    let edge = first.material.edge;
+    let profile = first.profile;
+    let px = first.scale as f32;
+    // The deepest the lens samples, for its width on each shape (`lens_width`).
+    let lens_reach_px = lens.inward_reach() * px;
+    let mut lens_widths = [profile.falloff; 16];
+    // The regions relative to the texture: up to 8 rectangles in two mat4 (one column per
+    // rectangle: x, y, width, height) and the radii in a mat4.
+    let mut rects = [[0.0_f32; 16]; 2];
+    let mut radii = [0.0_f32; 16];
+    // The tips' outlines (TIP-01), one column per region: half base, tan(angle), apex and
+    // fillet radii in pixels.
+    let mut tips = [[0.0_f32; 16]; 2];
+    // Each region's rotation about its centre, (cos, sin) two per column: region 2j in
+    // xy, 2j + 1 in zw.
+    let mut rotations = [0.0_f32; 16];
+    for (i, shape) in shapes.iter().take(MAX_SHAPES).enumerate() {
+        let (sin, cos) = shape.rotation.sin_cos();
+        let at = (i / 2) * 4 + (i % 2) * 2;
+        if let Some(slot) = rotations.get_mut(at..at + 2) {
+            slot.copy_from_slice(&[cos as f32, sin as f32]);
+        }
+        let local = shape.rect.loc - bbox.loc;
+        let values = [
+            local.x as f32,
+            local.y as f32,
+            shape.rect.size.w as f32,
+            shape.rect.size.h as f32,
+        ];
+        if let Some(slot) = rects
+            .get_mut(i / 4)
+            .and_then(|matrix| matrix.get_mut((i % 4) * 4..(i % 4) * 4 + 4))
+        {
+            slot.copy_from_slice(&values);
+        }
+        // Negative radius: a tip (the shader recognizes it by the sign): −1 points down,
+        // −2 up, −3 left, −4 right.
+        if let Some(tip) = shape.tip {
+            let (along, away) = match tip {
+                Tip::Down | Tip::Up => (shape.rect.size.w, shape.rect.size.h),
+                Tip::Left | Tip::Right => (shape.rect.size.h, shape.rect.size.w),
+            };
+            let scale = shape.scale.max(0.01);
+            let profile = TipProfile::fit(f64::from(along) / scale, f64::from(away) / scale);
+            if let Some(slot) = tips
                 .get_mut(i / 4)
                 .and_then(|matrix| matrix.get_mut((i % 4) * 4..(i % 4) * 4 + 4))
             {
-                slot.copy_from_slice(&values);
-            }
-            // Negative radius: a tip (the shader recognizes it by the sign): −1 points down,
-            // −2 up, −3 left, −4 right.
-            if let Some(tip) = shape.tip {
-                let (along, away) = match tip {
-                    Tip::Down | Tip::Up => (shape.rect.size.w, shape.rect.size.h),
-                    Tip::Left | Tip::Right => (shape.rect.size.h, shape.rect.size.w),
-                };
-                let scale = shape.scale.max(0.01);
-                let profile = TipProfile::fit(f64::from(along) / scale, f64::from(away) / scale);
-                if let Some(slot) = tips
-                    .get_mut(i / 4)
-                    .and_then(|matrix| matrix.get_mut((i % 4) * 4..(i % 4) * 4 + 4))
-                {
-                    slot.copy_from_slice(&profile.uniform(scale));
-                }
-            }
-            // A rounded shape carries its smoothing in the (otherwise unused) tip column.
-            if shape.tip.is_none()
-                && let Some(slot) = tips
-                    .get_mut(i / 4)
-                    .and_then(|matrix| matrix.get_mut((i % 4) * 4..(i % 4) * 4 + 1))
-            {
-                slot.copy_from_slice(&[shape.smoothing.clamp(0.0, 1.0) as f32]);
-            }
-            let thickness = shape.rect.size.w.min(shape.rect.size.h) as f32;
-            if let Some(slot) = lens_widths.get_mut(i) {
-                *slot = if profile.depth > 0.0 {
-                    refraction_band(thickness / px.max(0.01), profile.depth)
-                } else {
-                    lens_width(thickness, lens_reach_px, profile.falloff)
-                };
-            }
-            if let Some(slot) = radii.get_mut(i) {
-                *slot = match shape.tip {
-                    None => shape.radius as f32,
-                    Some(Tip::Down) => -1.0,
-                    Some(Tip::Up) => -2.0,
-                    Some(Tip::Left) => -3.0,
-                    Some(Tip::Right) => -4.0,
-                };
+                slot.copy_from_slice(&profile.uniform(scale));
             }
         }
-        let uniforms = [
-            Uniform::new(
-                "tex_size",
-                UniformValue::_2f(self.bbox.size.w as f32, self.bbox.size.h as f32),
-            ),
-            Uniform::new(
-                "shapes",
-                UniformValue::Matrix4x4 {
-                    matrices: rects.to_vec(),
-                    transpose: false,
-                },
-            ),
-            Uniform::new(
-                "radii",
-                UniformValue::Matrix4x4 {
-                    matrices: vec![radii],
-                    transpose: false,
-                },
-            ),
-            Uniform::new(
-                "rotations",
-                UniformValue::Matrix4x4 {
-                    matrices: vec![rotations],
-                    transpose: false,
-                },
-            ),
-            Uniform::new(
-                "tips",
-                UniformValue::Matrix4x4 {
-                    matrices: tips.to_vec(),
-                    transpose: false,
-                },
-            ),
-            Uniform::new(
-                "shape_count",
-                UniformValue::_1f(self.shapes.len().min(MAX_SHAPES) as f32),
-            ),
-            Uniform::new(
-                "merge",
-                UniformValue::_1f(2.0 * first.material.merge_pt * px),
-            ),
-            Uniform::new("exponent", UniformValue::_1f(2.0)),
-            Uniform::new("row_r", UniformValue::_3f(m[0][0], m[0][1], m[0][2])),
-            Uniform::new("row_g", UniformValue::_3f(m[1][0], m[1][1], m[1][2])),
-            Uniform::new("row_b", UniformValue::_3f(m[2][0], m[2][1], m[2][2])),
-            Uniform::new("offset", UniformValue::_3f(b[0], b[1], b[2])),
-            Uniform::new("curve2", UniformValue::_3f(q2[0], q2[1], q2[2])),
-            Uniform::new("curve3", UniformValue::_3f(q3[0], q3[1], q3[2])),
-            Uniform::new("scale_px", UniformValue::_1f(px)),
-            Uniform::new("lens", lens.uniform(px)),
-            Uniform::new("lens_reach", UniformValue::_1f(lens_extent(&lens) * px)),
-            Uniform::new("edges", edge.uniform()),
-            Uniform::new(
-                "fill_gray",
-                UniformValue::_1f(first.material.fill_on_gray_with(&profile)),
-            ),
-            Uniform::new("edge_power", UniformValue::_1f(EDGE_POWER)),
-            Uniform::new(
-                "lens_widths",
-                UniformValue::Matrix4x4 {
-                    matrices: vec![lens_widths],
-                    transpose: false,
-                },
-            ),
-            Uniform::new("refraction", UniformValue::_1f(profile.refraction)),
-            Uniform::new("chromatic", UniformValue::_1f(profile.chromatic)),
-            Uniform::new("brightness", UniformValue::_1f(profile.brightness)),
-            Uniform::new("rim", UniformValue::_1f(profile.rim)),
-            Uniform::new("line", UniformValue::_1f(profile.line)),
-            Uniform::new("saturation", UniformValue::_1f(profile.saturation)),
-            Uniform::new("tint_color", rgba(profile.tint)),
-            Uniform::new(
-                "shadow",
-                UniformValue::_3f(
-                    profile.shadow.opacity,
-                    profile.shadow.sigma * px,
-                    profile.shadow.offset_y * px,
-                ),
-            ),
-            Uniform::new(
-                "edge_on",
-                UniformValue::_1f(if edge == Edge::NONE { 0.0 } else { 1.0 }),
-            ),
-            Uniform::new("inside_rim", rgba(profile.inside_rim.color)),
-            Uniform::new(
-                "inside_rim_width",
-                UniformValue::_1f(profile.inside_rim.width * px),
-            ),
-            Uniform::new("rim_light", rgba(profile.rim_light.color)),
-            Uniform::new(
-                "rim_light_shape",
-                UniformValue::_2f(
-                    profile.rim_light.offset_y * px,
-                    profile.rim_light.sigma * px,
-                ),
-            ),
-            Uniform::new(
-                "fallback",
-                UniformValue::_4f(
-                    profile.fallback[0],
-                    profile.fallback[1],
-                    profile.fallback[2],
-                    if self.fallback { 1.0 } else { 0.0 },
-                ),
-            ),
-        ];
-        Ok(frame.render_texture_from_to(
-            texture,
-            src,
-            dst,
-            damage,
-            opaque_regions,
-            Transform::Normal,
-            first.opacity.clamp(0.0, 1.0),
-            Some(&program),
-            &uniforms,
-        )?)
+        // A rounded shape carries its smoothing in the (otherwise unused) tip column.
+        if shape.tip.is_none()
+            && let Some(slot) = tips
+                .get_mut(i / 4)
+                .and_then(|matrix| matrix.get_mut((i % 4) * 4..(i % 4) * 4 + 1))
+        {
+            slot.copy_from_slice(&[shape.smoothing.clamp(0.0, 1.0) as f32]);
+        }
+        let thickness = shape.rect.size.w.min(shape.rect.size.h) as f32;
+        if let Some(slot) = lens_widths.get_mut(i) {
+            *slot = if profile.depth > 0.0 {
+                refraction_band(thickness / px.max(0.01), profile.depth)
+            } else {
+                lens_width(thickness, lens_reach_px, profile.falloff)
+            };
+        }
+        if let Some(slot) = radii.get_mut(i) {
+            *slot = match shape.tip {
+                None => shape.radius as f32,
+                Some(Tip::Down) => -1.0,
+                Some(Tip::Up) => -2.0,
+                Some(Tip::Left) => -3.0,
+                Some(Tip::Right) => -4.0,
+            };
+        }
     }
+    vec![
+        Uniform::new(
+            "tex_size",
+            UniformValue::_2f(bbox.size.w as f32, bbox.size.h as f32),
+        ),
+        Uniform::new(
+            "shapes",
+            UniformValue::Matrix4x4 {
+                matrices: rects.to_vec(),
+                transpose: false,
+            },
+        ),
+        Uniform::new(
+            "radii",
+            UniformValue::Matrix4x4 {
+                matrices: vec![radii],
+                transpose: false,
+            },
+        ),
+        Uniform::new(
+            "rotations",
+            UniformValue::Matrix4x4 {
+                matrices: vec![rotations],
+                transpose: false,
+            },
+        ),
+        Uniform::new(
+            "tips",
+            UniformValue::Matrix4x4 {
+                matrices: tips.to_vec(),
+                transpose: false,
+            },
+        ),
+        Uniform::new(
+            "shape_count",
+            UniformValue::_1f(shapes.len().min(MAX_SHAPES) as f32),
+        ),
+        Uniform::new(
+            "merge",
+            UniformValue::_1f(2.0 * first.material.merge_pt * px),
+        ),
+        Uniform::new("exponent", UniformValue::_1f(2.0)),
+        Uniform::new("row_r", UniformValue::_3f(m[0][0], m[0][1], m[0][2])),
+        Uniform::new("row_g", UniformValue::_3f(m[1][0], m[1][1], m[1][2])),
+        Uniform::new("row_b", UniformValue::_3f(m[2][0], m[2][1], m[2][2])),
+        Uniform::new("offset", UniformValue::_3f(b[0], b[1], b[2])),
+        Uniform::new("curve2", UniformValue::_3f(q2[0], q2[1], q2[2])),
+        Uniform::new("curve3", UniformValue::_3f(q3[0], q3[1], q3[2])),
+        Uniform::new("scale_px", UniformValue::_1f(px)),
+        Uniform::new("lens", lens.uniform(px)),
+        Uniform::new("lens_reach", UniformValue::_1f(lens_extent(&lens) * px)),
+        Uniform::new("edges", edge.uniform()),
+        Uniform::new(
+            "fill_gray",
+            UniformValue::_1f(first.material.fill_on_gray_with(&profile)),
+        ),
+        Uniform::new("edge_power", UniformValue::_1f(EDGE_POWER)),
+        Uniform::new(
+            "lens_widths",
+            UniformValue::Matrix4x4 {
+                matrices: vec![lens_widths],
+                transpose: false,
+            },
+        ),
+        Uniform::new("refraction", UniformValue::_1f(profile.refraction)),
+        Uniform::new("chromatic", UniformValue::_1f(profile.chromatic)),
+        Uniform::new("brightness", UniformValue::_1f(profile.brightness)),
+        Uniform::new("rim", UniformValue::_1f(profile.rim)),
+        Uniform::new("line", UniformValue::_1f(profile.line)),
+        Uniform::new("saturation", UniformValue::_1f(profile.saturation)),
+        Uniform::new("tint_color", rgba(profile.tint)),
+        Uniform::new(
+            "shadow",
+            UniformValue::_3f(
+                profile.shadow.opacity,
+                profile.shadow.sigma * px,
+                profile.shadow.offset_y * px,
+            ),
+        ),
+        Uniform::new(
+            "edge_on",
+            UniformValue::_1f(if edge == Edge::NONE { 0.0 } else { 1.0 }),
+        ),
+        Uniform::new("inside_rim", rgba(profile.inside_rim.color)),
+        Uniform::new(
+            "inside_rim_width",
+            UniformValue::_1f(profile.inside_rim.width * px),
+        ),
+        Uniform::new("rim_light", rgba(profile.rim_light.color)),
+        Uniform::new(
+            "rim_light_shape",
+            UniformValue::_2f(
+                profile.rim_light.offset_y * px,
+                profile.rim_light.sigma * px,
+            ),
+        ),
+        Uniform::new(
+            "fallback",
+            UniformValue::_4f(
+                profile.fallback[0],
+                profile.fallback[1],
+                profile.fallback[2],
+                if fallback { 1.0 } else { 0.0 },
+            ),
+        ),
+    ]
 }
 
 #[cfg(test)]

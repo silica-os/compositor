@@ -9,7 +9,10 @@ use smithay::backend::renderer::gles::{Uniform, UniformValue};
 use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
 use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform};
 
+use std::sync::Arc;
+
 use crate::Program;
+use crate::cpu::shade::Corners;
 use crate::renderer::{SilicaError, SilicaFrame, SilicaRenderer};
 
 /// Superellipse |x/r|ⁿ + |y/r|ⁿ = 1 that stands for the Amalfi window corner: radius 18 with
@@ -128,26 +131,6 @@ impl RoundedSurface {
         }
     }
 
-    /// `shift`: how much the frame moves the element relative to the output (glass capture
-    /// into a smaller texture, always with the Normal transform).
-    fn uniforms(&self, transform: Transform, shift: Point<i32, Physical>) -> Vec<Uniform<'static>> {
-        let (mut x, mut y) = frag_to_local(self.output, self.window, transform);
-        if transform == Transform::Normal {
-            x[2] += shift.x as f32;
-            y[2] += shift.y as f32;
-        }
-        vec![
-            Uniform::new("frag_to_local_x", UniformValue::_3f(x[0], x[1], x[2])),
-            Uniform::new("frag_to_local_y", UniformValue::_3f(y[0], y[1], y[2])),
-            Uniform::new(
-                "geo_size",
-                UniformValue::_2f(self.window.size.w as f32, self.window.size.h as f32),
-            ),
-            Uniform::new("radius", UniformValue::_1f(self.radius as f32)),
-            Uniform::new("exponent", UniformValue::_1f(CORNER_EXPONENT)),
-        ]
-    }
-
     /// The four corner boxes, relative to the element's origin.
     fn corner_squares(&self, scale: Scale<f64>) -> [Rectangle<i32, Physical>; 4] {
         let origin = self.inner.geometry(scale).loc.to_f64();
@@ -224,6 +207,80 @@ impl Element for RoundedSurface {
     }
 }
 
+/// The corners a frame cuts from what it draws.
+#[derive(Debug, Clone, Copy)]
+pub struct Rounding {
+    /// The window, in physical pixels of the output.
+    pub window: Rectangle<f64, Physical>,
+    pub radius: f64,
+    /// The output's size before the frame transform.
+    pub output: Size<i32, Physical>,
+    /// How much the frame moves what it draws relative to the output (glass capture into a
+    /// smaller texture, always with the Normal transform).
+    pub shift: Point<i32, Physical>,
+}
+
+impl Rounding {
+    fn uniforms(&self, transform: Transform) -> Vec<Uniform<'static>> {
+        let (mut x, mut y) = frag_to_local(self.output, self.window, transform);
+        if transform == Transform::Normal {
+            x[2] += self.shift.x as f32;
+            y[2] += self.shift.y as f32;
+        }
+        vec![
+            Uniform::new("frag_to_local_x", UniformValue::_3f(x[0], x[1], x[2])),
+            Uniform::new("frag_to_local_y", UniformValue::_3f(y[0], y[1], y[2])),
+            Uniform::new(
+                "geo_size",
+                UniformValue::_2f(self.window.size.w as f32, self.window.size.h as f32),
+            ),
+            Uniform::new("radius", UniformValue::_1f(self.radius as f32)),
+            Uniform::new("exponent", UniformValue::_1f(CORNER_EXPONENT)),
+        ]
+    }
+}
+
+/// Runs `draw` with the window's corners cut from the textures it draws (the frame's texture
+/// program, for the time of `draw`). Without `program`, or on the CPU on a rotated output,
+/// the corners stay square.
+pub fn draw_rounded(
+    frame: &mut SilicaFrame<'_, '_>,
+    program: Option<Program>,
+    corners: Rounding,
+    draw: impl FnOnce(&mut SilicaFrame<'_, '_>) -> Result<(), SilicaError>,
+) -> Result<(), SilicaError> {
+    let mut overridden = false;
+    match (program, &mut *frame) {
+        (None, _) => {}
+        (Some(program), SilicaFrame::Gles(gles)) => {
+            if let Some(texture) = crate::frame_programs(gles).and_then(|p| p.texture(program)) {
+                let texture = texture.clone();
+                gles.override_default_tex_program(texture, corners.uniforms(gles.transformation()));
+                overridden = true;
+            }
+        }
+        (Some(_), SilicaFrame::Cpu(cpu)) => {
+            // In the target's pixels: the window's origin there is where the frame moves it.
+            let origin = corners.window.loc - corners.shift.to_f64();
+            let shader = Corners::new(
+                [origin.x, origin.y],
+                [corners.window.size.w as f32, corners.window.size.h as f32],
+                corners.radius as f32,
+                CORNER_EXPONENT,
+            );
+            overridden = cpu.override_shader(Arc::new(shader)).is_ok();
+        }
+    }
+    let result = draw(frame);
+    if overridden {
+        match frame {
+            SilicaFrame::Gles(gles) => gles.clear_tex_program_override(),
+            SilicaFrame::Cpu(cpu) => cpu.clear_shader(),
+        }
+    }
+    result
+}
+
 impl RenderElement<SilicaRenderer> for RoundedSurface {
     fn draw(
         &self,
@@ -234,20 +291,15 @@ impl RenderElement<SilicaRenderer> for RoundedSurface {
         opaque_regions: &[Rectangle<i32, Physical>],
     ) -> Result<(), SilicaError> {
         let shift = self.drawn_origin() - dst.loc;
-        let mut overridden = false;
-        if let (Some(program), SilicaFrame::Gles(gles)) = (self.program, &mut *frame)
-            && let Some(texture) = crate::frame_programs(gles).and_then(|p| p.texture(program))
-        {
-            let texture = texture.clone();
-            let uniforms = self.uniforms(gles.transformation(), shift);
-            gles.override_default_tex_program(texture, uniforms);
-            overridden = true;
-        }
-        let result = self.inner.draw(frame, src, dst, damage, opaque_regions);
-        if overridden && let SilicaFrame::Gles(gles) = frame {
-            gles.clear_tex_program_override();
-        }
-        result
+        let corners = Rounding {
+            window: self.window,
+            radius: self.radius,
+            output: self.output,
+            shift,
+        };
+        draw_rounded(frame, self.program, corners, |frame| {
+            self.inner.draw(frame, src, dst, damage, opaque_regions)
+        })
     }
 
     fn underlying_storage(&self, renderer: &mut SilicaRenderer) -> Option<UnderlyingStorage<'_>> {
