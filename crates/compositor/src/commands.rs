@@ -33,17 +33,10 @@ use silica_control::commands::{
     SYSTEM_VOLUME_DOWN_FINE, SYSTEM_VOLUME_UP, SYSTEM_VOLUME_UP_FINE, SYSTEM_WIFI, ValueParams,
 };
 use silica_control::commands::{
-    DESKTOP_SHOW, PANORAMA_APP, PANORAMA_SPACES_BAR, PANORAMA_STATE, PANORAMA_TOGGLE,
-};
-use silica_control::commands::{
     DOCK_ICONS, DockIconsParams, MinimizeEffectParams, WINDOW_MINIMIZE_EFFECT,
 };
 use silica_control::commands::{
     IDLE_STATE, INPUT_STATE, KEYBOARD_NEXT_SOURCE, KEYBOARD_SELECT_SOURCE, KEYBOARD_STATE,
-};
-use silica_control::commands::{
-    IndexParams, MoveToSpaceParams, SPACE_ADD, SPACE_GOTO, SPACE_LIST, SPACE_NEXT, SPACE_PREVIOUS,
-    SPACE_REMOVE, SpaceInfo, WINDOW_MOVE_TO_SPACE,
 };
 use silica_control::commands::{
     LAUNCHER_TOGGLE, SWITCHER_CANCEL, SWITCHER_COMMIT, SWITCHER_EXPOSE, SWITCHER_NEXT,
@@ -56,7 +49,7 @@ use smithay::backend::input::{ButtonState, KeyState};
 use smithay::desktop::Window;
 use smithay::input::keyboard::Keycode;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Point, SERIAL_COUNTER};
+use smithay::utils::{Point, SERIAL_COUNTER};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use tracing::{info, warn};
@@ -281,64 +274,6 @@ impl State {
             LAYER_LIST => to_value(self.layer_list()),
             GLASS_LIST => to_value(self.glass_list()),
             // Commands of the shell components: The compositor forwards them.
-            SPACE_LIST => to_value(self.space_list()),
-            SPACE_NEXT | SPACE_PREVIOUS => {
-                let active = self.workspaces.active;
-                let to = if id == SPACE_NEXT {
-                    active.saturating_add(1)
-                } else {
-                    // Before the first space nothing happens (no bounce).
-                    match active.checked_sub(1) {
-                        Some(to) => to,
-                        None => return Ok(json!({ "switched": false })),
-                    }
-                };
-                Ok(json!({ "switched": self.switch_space(to, std::time::Instant::now()) }))
-            }
-            SPACE_GOTO => {
-                let IndexParams { index } = parse_required(params)?;
-                if index >= self.workspaces.count() {
-                    return Err(format!("space {index} absent"));
-                }
-                Ok(json!({ "switched": self.switch_space(index, std::time::Instant::now()) }))
-            }
-            PANORAMA_TOGGLE => {
-                self.toggle_panorama(std::time::Instant::now());
-                Ok(json!({ "open": self.panorama_open() }))
-            }
-            PANORAMA_STATE => to_value(self.panorama_state()),
-            PANORAMA_APP | DESKTOP_SHOW => {
-                let mode = if id == PANORAMA_APP {
-                    crate::panorama::Mode::App
-                } else {
-                    crate::panorama::Mode::Desktop
-                };
-                self.toggle_view(mode, std::time::Instant::now());
-                Ok(json!({ "open": self.panorama_mode() == Some(mode) }))
-            }
-            PANORAMA_SPACES_BAR => {
-                let EnabledParams { enabled } = parse_required(params)?;
-                if !self.panorama_open() {
-                    return Err("Panorama is not open".to_owned());
-                }
-                self.expand_spaces_bar(enabled, std::time::Instant::now());
-                Ok(Value::Null)
-            }
-            SPACE_ADD => Ok(json!({ "index": self.add_space()? })),
-            SPACE_REMOVE => {
-                let IndexParams { index } = parse_required(params)?;
-                self.remove_space(index)?;
-                Ok(Value::Null)
-            }
-            WINDOW_MOVE_TO_SPACE => {
-                let MoveToSpaceParams { id, index } = parse_required(params)?;
-                let window = match id.and_then(|id| self.stored_window(id)) {
-                    Some(window) => window,
-                    None => self.target_window(id)?,
-                };
-                self.move_window_to_space(&window, index)?;
-                Ok(Value::Null)
-            }
             SYSTEM_STATUS => self
                 .system
                 .status()
@@ -407,12 +342,6 @@ impl State {
             }
             WINDOW_FOCUS => {
                 let target: WindowTarget = parse(params)?;
-                // A window of another space: switch to that space.
-                if let Some(id) = target.id
-                    && let Some(space) = self.stored_window_space(id)
-                {
-                    self.switch_space(space, std::time::Instant::now());
-                }
                 // A window of a hidden app: the app comes back.
                 let hidden = target.id.and_then(|id| {
                     self.hidden_apps
@@ -512,7 +441,7 @@ impl State {
                     return Ok(json!({ "closed": 0, "quit": app }));
                 }
                 let window = self.target_window(None)?;
-                let app = crate::panorama::window_app(&window);
+                let app = crate::windows::window_app(&window);
                 let mut windows: Vec<Window> = vec![window];
                 if let Some(app) = &app {
                     windows = self
@@ -520,8 +449,7 @@ impl State {
                         .elements()
                         .chain(self.minimized.iter().map(|(w, _)| w))
                         .chain(self.hidden_apps.windows())
-                        .chain(self.workspaces.stored.iter().flatten().map(|(w, _)| w))
-                        .filter(|w| crate::panorama::window_app(w).as_deref() == Some(app.as_str()))
+                        .filter(|w| crate::windows::window_app(w).as_deref() == Some(app.as_str()))
                         .cloned()
                         .collect();
                 }
@@ -921,56 +849,6 @@ impl State {
         }
     }
 
-    /// The spaces with their windows (`space.list`).
-    fn space_list(&self) -> Vec<SpaceInfo> {
-        (0..self.workspaces.count())
-            .map(|index| {
-                let active = index == self.workspaces.active;
-                let windows = if active {
-                    self.space
-                        .elements()
-                        .filter(|w| self.window_space(w) == Some(index))
-                        .filter_map(Self::window_id)
-                        .collect()
-                } else {
-                    self.workspaces
-                        .stored
-                        .get(index)
-                        .map(|placed| {
-                            placed
-                                .iter()
-                                .filter_map(|(w, _)| Self::window_id(w))
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                };
-                SpaceInfo {
-                    index,
-                    active,
-                    windows,
-                }
-            })
-            .collect()
-    }
-
-    /// A window of a non-active space.
-    fn stored_window(&self, id: u64) -> Option<Window> {
-        self.workspaces
-            .stored
-            .iter()
-            .flatten()
-            .find(|(w, _)| Self::window_id(w) == Some(id))
-            .map(|(w, _)| w.clone())
-    }
-
-    /// The non-active space containing window `id`.
-    fn stored_window_space(&self, id: u64) -> Option<usize> {
-        self.workspaces
-            .stored
-            .iter()
-            .position(|placed| placed.iter().any(|(w, _)| Self::window_id(w) == Some(id)))
-    }
-
     /// The surface a keyboard focus belongs to: for a popup (an app's menu or popover, a
     /// shell layer's menu) the root of its chain, the window or layer it hangs from; otherwise
     /// the surface itself.
@@ -1065,14 +943,6 @@ impl State {
         let mut windows: Vec<(&Window, bool)> =
             self.space.elements().rev().map(|w| (w, false)).collect();
         windows.extend(self.minimized.iter().map(|(w, _)| (w, true)));
-        // Then the windows of the other spaces, each with its position in the space.
-        let stored: Vec<(&Window, Point<i32, Logical>)> = self
-            .workspaces
-            .stored
-            .iter()
-            .flat_map(|placed| placed.iter().rev().map(|(w, l)| (w, *l)))
-            .collect();
-        windows.extend(stored.iter().map(|(w, _)| (*w, false)));
         windows
             .into_iter()
             .filter_map(|(window, minimized)| {
@@ -1083,14 +953,8 @@ impl State {
                         .find(|(w, _)| w == window)
                         .map(|(_, location)| *location)
                         .unwrap_or_default()
-                } else if let Some(location) = self.space.element_location(window) {
-                    location
                 } else {
-                    stored
-                        .iter()
-                        .find(|(w, _)| *w == window)
-                        .map(|(_, location)| *location)
-                        .unwrap_or_default()
+                    self.space.element_location(window).unwrap_or_default()
                 };
                 let size = window.geometry().size;
                 let (title, app_id) = window
@@ -1117,22 +981,20 @@ impl State {
                     focused: focused.as_ref() == Some(window),
                     minimized,
                     fullscreen: crate::windows::is_fullscreen(window),
-                    space: self.window_space(window).unwrap_or(self.workspaces.active),
                 })
             })
             .collect()
     }
 
     /// Kills (SIGKILL) the processes of an app's windows: all those with that app_id, on
-    /// screen, minimized or in other spaces. Never a shell component nor the compositor itself.
+    /// screen, minimized or hidden. Never a shell component nor the compositor itself.
     fn force_quit(&mut self, app_id: &str) -> Result<usize, String> {
         let pids: std::collections::BTreeSet<i32> = self
             .space
             .elements()
             .chain(self.minimized.iter().map(|(w, _)| w))
             .chain(self.hidden_apps.windows())
-            .chain(self.workspaces.stored.iter().flatten().map(|(w, _)| w))
-            .filter(|w| crate::panorama::window_app(w).as_deref() == Some(app_id))
+            .filter(|w| crate::windows::window_app(w).as_deref() == Some(app_id))
             .filter_map(|w| {
                 let surface = w.toplevel()?.wl_surface().clone();
                 let client = self.display_handle.get_client(surface.id()).ok()?;

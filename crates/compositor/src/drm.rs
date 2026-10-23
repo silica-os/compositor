@@ -1326,11 +1326,6 @@ impl State {
         let glass_quality = self.glass_quality();
         self.closing.retain(|closing| !closing.finished(now, speed));
         self.genies.retain(|genie| !genie.finished(now, speed));
-        self.advance_spaces(now);
-        self.advance_panorama(now);
-        let space_shift = self.space_shift();
-        let panorama = self.panorama_view();
-        let spaces = (self.workspaces.count(), self.workspaces.active);
         let buttons = self.buttons_view();
         let alt = self.alt_held();
         let dark = self.dark();
@@ -1369,9 +1364,6 @@ impl State {
             now,
             glass_quality,
             glass_level: self.theme_config.glass,
-            space_shift,
-            panorama,
-            spaces,
             dark,
             drag_icon,
             window_veil,
@@ -1480,10 +1472,9 @@ impl State {
             }
         }
         // The extra displays: the same scene from their place in the space, without the lock
-        // surface (black while locked) and without Panorama, which lives on the primary one.
+        // surface (black while locked).
         let context = crate::render::RenderContext {
             lock_surfaces: context.lock_surfaces.as_ref().map(|_| Vec::new()),
-            panorama: None,
             ..context
         };
         for extra in backend.extras.iter_mut().filter(|e| !e.pending) {

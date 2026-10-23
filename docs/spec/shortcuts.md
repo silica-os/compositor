@@ -8,6 +8,8 @@ PC keyboards often lack for window tiling; Silica binds those with Super instead
 
 ## Spaces, Panorama, Dock
 
+The Dock handles these, as on macOS; the compositor no longer binds them.
+
 | Keys | Silica action | Default |
 |---|---|---|
 | F9 (Super+Up also) | open or close Panorama | on |

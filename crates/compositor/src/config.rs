@@ -290,9 +290,6 @@ pub struct HotCornersConfig {
 pub fn hot_corner_command(action: &str) -> Option<&'static str> {
     use silica_control::commands as c;
     Some(match action {
-        "panorama" => c::PANORAMA_TOGGLE,
-        "appWindows" => c::PANORAMA_APP,
-        "desktop" => c::DESKTOP_SHOW,
         "notifications" => c::NOTIFICATIONS_TOGGLE,
         "launcher" => c::LAUNCHER_TOGGLE,
         "controlCenter" => c::CONTROLCENTER_TOGGLE,
@@ -967,11 +964,15 @@ mod tests {
             _ => HotCornersConfig::parse(None),
         };
         let config = parse(
-            r#"{"topLeft": "panorama", "bottomRight": "desktop", "topRight": "none",
+            r#"{"topLeft": "launcher", "bottomRight": "notifications", "topRight": "panorama",
                 "bottomLeft": "rm -rf"}"#,
         );
-        assert_eq!(config.command(Corner::TopLeft), Some("panorama.toggle"));
-        assert_eq!(config.command(Corner::BottomRight), Some("desktop.show"));
+        assert_eq!(config.command(Corner::TopLeft), Some("launcher.toggle"));
+        assert_eq!(
+            config.command(Corner::BottomRight),
+            Some("notifications.toggle")
+        );
+        // Mission Control belongs to the Dock.
         assert_eq!(config.command(Corner::TopRight), None);
         assert_eq!(config.command(Corner::BottomLeft), None);
         assert_eq!(HotCornersConfig::parse(None), HotCornersConfig::default());

@@ -90,8 +90,8 @@ says otherwise. Labels are in English.
 | [tip.md](tip.md) | The tips of menus and popovers |
 | [windows.md](windows.md) | Windows: corners, shadows, border, buttons, animations |
 | [dialogs.md](dialogs.md) | System alerts and dialogs |
-| [spaces.md](spaces.md) | Spaces: switching, adding, removing, full screen, dragging |
-| [panorama.md](panorama.md) | Panorama, App Windows, Show Desktop, hot corners |
+| [spaces.md](https://github.com/silica-os/dock/blob/main/docs/spec/spaces.md) | Spaces: switching, adding, removing, full screen, dragging (the Dock's, as on macOS) |
+| [panorama.md](https://github.com/silica-os/dock/blob/main/docs/spec/panorama.md) | Panorama, App Windows, Show Desktop, hot corners (the Dock's, as on macOS) |
 | [app-switcher.md](app-switcher.md) | The app switcher panel |
 | [launcher.md](launcher.md) | Launcher: layout, categories, search |
 | [faro.md](faro.md) | Faro, the search panel |

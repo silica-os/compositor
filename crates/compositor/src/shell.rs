@@ -167,11 +167,11 @@ impl State {
         // The windowless frontmost app quit (its hidden window went with it, #142).
         if let Some(window) = &window
             && self.windowless_front.is_some()
-            && crate::panorama::window_app(window) == self.windowless_front
+            && crate::windows::window_app(window) == self.windowless_front
             && !self
                 .hidden
                 .iter()
-                .any(|(w, _)| crate::panorama::window_app(w) == self.windowless_front)
+                .any(|(w, _)| crate::windows::window_app(w) == self.windowless_front)
         {
             self.set_windowless_front(None);
         }
@@ -374,12 +374,12 @@ impl State {
         // comes back by itself (the Dock, if they are all minimized, asks for the last one).
         if whole_app
             && self.space.elements().any(|w| *w == window)
-            && let Some(app) = crate::panorama::window_app(&window)
+            && let Some(app) = crate::windows::window_app(&window)
         {
             let same: Vec<Window> = self
                 .space
                 .elements()
-                .filter(|w| crate::panorama::window_app(w).as_deref() == Some(app.as_str()))
+                .filter(|w| crate::windows::window_app(w).as_deref() == Some(app.as_str()))
                 .cloned()
                 .collect();
             for w in &same {

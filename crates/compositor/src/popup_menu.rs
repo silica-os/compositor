@@ -156,7 +156,7 @@ impl State {
             root = top;
         }
         if let Some(window) = self.window_for(&root) {
-            return crate::panorama::window_app(&window).unwrap_or_default();
+            return crate::windows::window_app(&window).unwrap_or_default();
         }
         let map = smithay::desktop::layer_map_for_output(&self.output);
         map.layer_for_surface(&root, smithay::desktop::WindowSurfaceType::TOPLEVEL)

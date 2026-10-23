@@ -275,7 +275,7 @@ impl XdgShellHandler for State {
                 .parent()
                 .or_else(|| crate::windows::last_parent(&window));
             if let (Some(app), Some(location), None) = (
-                crate::panorama::window_app(&window),
+                crate::windows::window_app(&window),
                 self.space.element_location(&window),
                 parent.as_ref(),
             ) {
@@ -367,7 +367,7 @@ impl XdgShellHandler for State {
         if !fresh || surface.parent().is_some() {
             return;
         }
-        if let Some(app) = crate::panorama::window_app(&window)
+        if let Some(app) = crate::windows::window_app(&window)
             && let Some(frame) = self.app_frames.get(&app)
         {
             let area = self.usable_area();

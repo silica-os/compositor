@@ -19,6 +19,8 @@ Dock, secondary on its left), with separate spaces per display. Reference: PA-50
 
 ## Panorama with two displays (ref: displays › overview)
 
+Panorama and spaces belong to the Dock, as on macOS ([dock spec](https://github.com/silica-os/dock/blob/main/docs/spec/panorama.md)).
+
 - Panorama opens on both displays at once, each with its own spaces bar and its own windows.
 - Dragging a window thumbnail across: it appears at full size under the pointer on the other
   display; both spaces bars expand to 170 pt; the destination display's wallpaper darkens to 50 %

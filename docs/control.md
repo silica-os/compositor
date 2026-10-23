@@ -34,19 +34,8 @@ parameter schemas. Every catalog id is run by the compositor (test
 | `session.lock` | — | locks the session (`Logo+Ctrl+Q`) and asks the shell's locker to take the lock; refused when no shell is running. There is no command to unlock |
 | `engine.commands` | — | the catalog |
 | `engine.execute` | `id`, `params?` | the command's result |
-| `window.list` | — | windows from top to bottom, then the minimized ones: `id`, `title`, `app_id`, `x`, `y`, `width`, `height` (of the content, without the bar), `focused`, `minimized`, `fullscreen`, `space` |
-| `input.gesture` | `kind` (`swipe`, `pinch`), `fingers`, `phase?` (`begin`, `update`, `end`; without: the whole gesture), `dx`, `dy`, `scale`, `cancelled` | `command` run at the end (null if none). Provisional (PA-20…22): 3–4 fingers ←/→ space, ↑ Panorama, ↓ the app's windows or closes the view; thumb and three fingers: spreading the desktop, pinching the launcher |
-| `space.list` | — | spaces: `index`, `active`, `windows` (ids from bottom to top) |
-| `space.next`, `space.previous` | — | `switched`: false past the last or before the first (no bounce); ⌃→ and ⌃← |
-| `space.goto` | `index` | `switched` |
-| `space.add` | — | `index` of the new space (at most 16) |
-| `space.remove` | `index` | — ; the windows move to the previous space (or to the first) |
-| `window.move_to_space` | `id?`, `index` | — |
-| `panorama.toggle` | — | `open`: opens or closes Panorama (⌃↑; Esc closes). When open, a click on a window brings it to the front, on empty space closes, on a space of the bar goes there, on the "+" adds a space |
-| `panorama.state` | — | `mode` (`panorama`, `app`, `desktop`; absent if closed), `open`, `progress` (0–1), `windows`: `id`, `x`, `y`, `width`, `height` of the arranged frames; `expansion` of the spaces bar (0–1), `thumbnails`: rectangles of the thumbnails when visible |
-| `panorama.app` | — | `open`: App Exposé, the windows of the frontmost app at the center with the title below (⌃↓; Esc closes) |
-| `desktop.show` | — | `open`: Show Desktop, the windows move out towards the nearest edge (F11; again or a click puts them back) |
-| `panorama.spaces_bar` | `enabled` | — ; expands or collapses the spaces bar (like the pointer at the top). With the bar expanded a window dragged onto a thumbnail moves to that space; a click on a thumbnail goes there |
+| `window.list` | — | windows from top to bottom, then the minimized ones: `id`, `title`, `app_id`, `x`, `y`, `width`, `height` (of the content, without the bar), `focused`, `minimized`, `fullscreen` |
+| `input.gesture` | `kind` (`swipe`, `pinch`), `fingers`, `phase?` (`begin`, `update`, `end`; without: the whole gesture), `dx`, `dy`, `scale`, `cancelled` | `command` run at the end (null if none). Swipes go to the app; thumb and three fingers pinching open the launcher. The gestures of spaces and Mission Control belong to the Dock |
 | `switcher.next`, `switcher.previous` | — | `forwarded`: opens the app switcher or moves the selection (Logo+Tab, Logo+Shift+Tab); while it is open, releasing the Logo key runs `switcher.commit` and Esc `switcher.cancel` |
 | `switcher.commit`, `switcher.cancel` | — | `forwarded`: closes the switcher activating the chosen app, or without changing app |
 | `switcher.expose` | — | `forwarded`: closes the switcher and opens App Exposé of the chosen app (Up or Down while the switcher is open); releasing the Logo key afterwards changes nothing |
@@ -81,7 +70,7 @@ parameter schemas. Every catalog id is run by the compositor (test
 | `input.pointer_button` | `button?`, `pressed` | — |
 | `input.click` | `x`, `y`, `button?` | — |
 | `input.scroll` | `x`, `y`, `dx?`, `dy?` | — ; the wheel at that point (logical pixels, 15 = one notch), like a real one: an open menu may drop it (#149) |
-| `input.key` | `key` (xkb name or character), `pressed?` | — ; like a real key, catalog shortcuts included (⌃→ switches space) |
+| `input.key` | `key` (xkb name or character), `pressed?` | — ; like a real key, catalog shortcuts included |
 | `input.type` | `text` | — |
 | `perf.frames` | `reset?` | per surface: `surface`, `pid`, `frames`, `mean_ms`, `p50_ms`, `p95_ms`, `p99_ms`, `max_ms`, `slow`, `period_ms`, `startup_ms` |
 | `perf.process` | `pid` | `pid`, `rss_kib`, `pss_kib` |
@@ -193,8 +182,7 @@ the saver to the shell as `screensaver.active` (its id, empty when none) and any
 
 `hotcorners.topLeft`, `hotcorners.topRight`, `hotcorners.bottomLeft`, `hotcorners.bottomRight`:
 the action the compositor runs once when the pointer arrives in that corner (it is armed again after the
-pointer leaves): `panorama` (`panorama.toggle`), `appWindows` (`panorama.app`), `desktop`
-(`desktop.show`), `notifications` (`notifications.toggle`), `launcher` (`launcher.toggle`),
+pointer leaves): `notifications` (`notifications.toggle`), `launcher` (`launcher.toggle`),
 `controlCenter` (`controlcenter.toggle`), `search` (`faro.toggle`); `none` (the default) does
 nothing. Dragging or resizing a window into a corner does not trigger it.
 
@@ -220,7 +208,7 @@ the compositor let every key reach Settings, and only while Settings is the fron
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `look.reduceTransparency` (System1) | boolean | Accessibility › Display: the glass is drawn opaque (the `opaque` quality, no blur) |
-| `look.reduceMotion` (System1) | boolean | Accessibility › Display: The compositor's own animations are skipped (the window genie, closing, space switch, Panorama) |
+| `look.reduceMotion` (System1) | boolean | Accessibility › Display: The compositor's own animations are skipped (the window genie, closing) |
 | `look.glass` (System1) | number 0–1 | how tinted the glass is: 0 clearest, 1 most tinted; 0.5 (default) is the measured material. Only the tint's strength changes (`GlassProfile::with_glass_level`) |
 | `accessibility.cursorSize` | integer 16–128 | Accessibility › Pointer: the pointer's size in logical pixels (default 24) |
 
@@ -283,14 +271,12 @@ protocol is the same JSON lines as the control channel, and only the commands in
 - `launcher.toggle`, `faro.toggle`;
 - `screenshot.toolbar`, `screenshot.screen`, `screenshot.selection`,
   `screenshot.screen_clipboard`, `screenshot.selection_clipboard`;
-- `panorama.toggle`, `notifications.toggle`, `controlcenter.toggle`;
+- `notifications.toggle`, `controlcenter.toggle`;
 - `output.list`, `output.configure`, `output.color_temperature`: for silica-daemon, which gives
   apps the displays and runs the night light (`System1`, `docs/daemon.md`). The compositor passes its
   `WAYLAND_DISPLAY` to the services it starts, so they find the socket.
 
 Anything else is refused. The client is `silica-action <action>`, which finds the socket
 through `WAYLAND_DISPLAY`. `shell/linux/*.desktop.in` are the shell's own applications:
-`dev.frascella.Apps` runs `silica-action launcher.toggle`, `dev.frascella.MissionControl`
-runs `silica-action panorama.toggle` (Utility, not pinned; its icon `mission-control` is still
-missing from silica-icons) and `dev.frascella.Screenshot` runs
-`silica-action screenshot.toolbar`.
+`dev.frascella.Apps` runs `silica-action launcher.toggle` and `dev.frascella.Screenshot` runs
+`silica-action screenshot.toolbar`. Spaces and Mission Control belong to the Dock, as on macOS.

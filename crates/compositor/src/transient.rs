@@ -301,7 +301,7 @@ impl State {
                 .elements()
                 .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == root));
             match window {
-                Some(window) => crate::panorama::window_app(window),
+                Some(window) => crate::windows::window_app(window),
                 None => {
                     let map = smithay::desktop::layer_map_for_output(&self.output);
                     map.layer_for_surface(root, WindowSurfaceType::TOPLEVEL)
@@ -434,7 +434,7 @@ impl State {
         }
     }
 
-    /// A change of context (another window activated, the desktop, a space switch, Panorama):
+    /// A change of context (another window activated, the desktop, a shell panel):
     /// every open menu, popup and panel ends, the shell with `dismissed`, the apps' popups
     /// with `popup_done` (#219).
     pub fn dismiss_transients(&mut self) {

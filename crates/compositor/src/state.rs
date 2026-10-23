@@ -207,12 +207,6 @@ pub struct State {
     pub app_frames: crate::app_frames::AppFrames,
     /// Shell components kept running (`--keep-shell`, `keep.rs`).
     pub keeper: crate::keep::Keeper,
-    /// The workspaces and the scroll in progress (`workspaces.rs`).
-    pub workspaces: crate::workspaces::Workspaces,
-    /// Panorama open or closing (`panorama.rs`).
-    pub panorama: Option<crate::panorama::Panorama>,
-    /// The click that opened or used Panorama: the release does not go to the client.
-    pub panorama_press: bool,
     /// Open menus, panels and grabbed popups (`transient.rs`, #149).
     pub transients: Vec<crate::transient::Transient>,
     /// A press outside a transient was consumed: its release does not go to the client.
@@ -318,12 +312,10 @@ impl State {
     }
 
     /// Whether the compositor itself is animating (not a client): a window closing or minimizing,
-    /// a space switch, Panorama, an animated pointer. Frames are drawn on every tick then.
+    /// an animated pointer. Frames are drawn on every tick then.
     pub fn compositor_animating(&mut self) -> bool {
         if !self.closing.is_empty()
             || !self.genies.is_empty()
-            || self.workspaces.transition.is_some()
-            || self.panorama.is_some()
             || self.resizing.is_some()
             || self.resize_settling.is_some()
         {
@@ -533,9 +525,6 @@ impl State {
             windowless_history: Vec::new(),
             app_frames: crate::app_frames::AppFrames::default(),
             keeper: crate::keep::Keeper::default(),
-            workspaces: crate::workspaces::Workspaces::default(),
-            panorama: None,
-            panorama_press: false,
             switcher_active: false,
             logo_key: crate::keys::LogoKey::None,
             gesture: None,

@@ -124,8 +124,6 @@ pub fn init_headless(
         .handle()
         .insert_source(Timer::from_duration(HEADLESS_FRAME), |_, _, data| {
             data.state.render_headless_frame();
-            data.state.advance_spaces(std::time::Instant::now());
-            data.state.advance_panorama(std::time::Instant::now());
             data.state.send_frames();
             let feedback = data.state.take_presentation_feedback();
             data.state.presented(feedback);
@@ -145,8 +143,6 @@ impl State {
         let speed = self.animation_speed;
         self.genies.retain(|genie| !genie.finished(now, speed));
         let glass_quality = self.glass_quality();
-        self.advance_spaces(now);
-        self.advance_panorama(now);
         let lock_surfaces = self.lock_wl_surfaces();
         // Locked: black behind the lock surface, and the plain screen if the locker is gone.
         let clear_color = if lock_surfaces.is_some() {
@@ -164,9 +160,6 @@ impl State {
             now,
             glass_quality,
             glass_level: self.theme_config.glass,
-            space_shift: self.space_shift(),
-            panorama: self.panorama_view(),
-            spaces: (self.workspaces.count(), self.workspaces.active),
             dark: self.dark(),
             drag_icon: self.drag_icon_view(),
             window_veil: self.window_veil_view(),

@@ -29,9 +29,8 @@ use common::Headless;
 use common::client::TestWindow;
 use serde_json::{Value, json};
 use silica_control::commands::{
-    INPUT_POINTER_MOVE, PANORAMA_TOGGLE, PERF_RENDER, RenderTimes, SPACE_ADD, SPACE_NEXT,
-    SPACE_PREVIOUS, UI_ANIMATION_SCALE, WINDOW_FOCUS, WINDOW_LIST, WINDOW_MINIMIZE, WINDOW_MOVE,
-    WindowInfo,
+    INPUT_POINTER_MOVE, PERF_RENDER, RenderTimes, UI_ANIMATION_SCALE, WINDOW_FOCUS, WINDOW_LIST,
+    WINDOW_MINIMIZE, WINDOW_MOVE, WindowInfo,
 };
 use silica_protocols::glass::client::silica_glass_v1::Material;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer;
@@ -206,30 +205,6 @@ fn drag(scene: &mut Scene) {
     scene.call(WINDOW_MOVE, json!({ "id": id, "x": 320, "y": 160 }));
 }
 
-fn spaces(scene: &mut Scene) {
-    scene.each_frame(|scene, i| {
-        alternate(
-            scene,
-            i,
-            45,
-            |s| drop(s.call(SPACE_NEXT, Value::Null)),
-            |s| drop(s.call(SPACE_PREVIOUS, Value::Null)),
-        );
-    });
-}
-
-fn panorama(scene: &mut Scene) {
-    scene.each_frame(|scene, i| {
-        alternate(
-            scene,
-            i,
-            45,
-            |s| drop(s.call(PANORAMA_TOGGLE, Value::Null)),
-            |s| drop(s.call(PANORAMA_TOGGLE, Value::Null)),
-        );
-    });
-}
-
 fn genie(scene: &mut Scene) {
     let id = scene.id;
     scene.each_frame(|scene, i| {
@@ -257,13 +232,10 @@ fn stage_p99(times: &RenderTimes, name: &str) -> Option<f64> {
 fn frame_budget() {
     let renderer = std::env::var("SILICA_COMPOSITOR_HEADLESS_RENDERER").unwrap_or_default();
     let mut scene = Scene::open();
-    scene.call(SPACE_ADD, Value::Null);
-    let scenarios: [Scenario; 6] = [
+    let scenarios: [Scenario; 4] = [
         ("spinner", spinner),
         ("hover", hover),
         ("drag", drag),
-        ("spaces", spaces),
-        ("panorama", panorama),
         ("genie", genie),
     ];
     let mut failed = Vec::new();

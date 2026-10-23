@@ -6,7 +6,6 @@
 //! images, text, sharp edges, light and dark) at full resolution and at its `BlurScale`; the
 //! two may differ by at most 1/255 on average over the glass and 3/255 at any pixel and
 //! channel. `GLASS_EQUIVALENCE_WALLPAPERS` (PNG paths separated by `:`) adds real wallpapers;
-//! The Panorama spaces bar is Glass/Regular: it uses the panels' profile and so their scale.
 //! `cargo test -p compositor glass_equivalence -- --ignored --nocapture` prints the table every
 //! factor gives, to choose the scales.
 
@@ -1056,10 +1055,10 @@ fn the_cached_backdrop_equals_a_fresh_one_after_every_change() {
     s.layers[1].update(&mut gpu.renderer, wallpaper, full);
     check(&mut gpu, &cache, &s, "wallpaper changed");
 
-    // A space switch: other elements behind (other ids).
+    // Another scene behind: other elements (other ids).
     let other = scene(&mut gpu, 1.0, false);
     s.layers = other.layers;
-    check(&mut gpu, &cache, &s, "space switch");
+    check(&mut gpu, &cache, &s, "scene changed");
 
     // The glass's own animation: it moves, grows, fades.
     s.regions[0].rect.loc += Point::from((9, -4));

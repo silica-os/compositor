@@ -36,7 +36,6 @@ mod keymap;
 pub mod keys;
 mod layers;
 mod lock;
-pub(crate) mod panorama;
 mod perf;
 mod popup_menu;
 mod protocols;
@@ -51,11 +50,9 @@ pub mod state;
 mod system;
 mod systemd;
 mod tablet;
-mod thumbnail_row;
 mod transient;
 mod window_appearance;
 mod windows;
-pub mod workspaces;
 
 use std::io::Write;
 
@@ -250,7 +247,6 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
 
     event_loop.run(None, &mut compositor, |compositor| {
         compositor.state.space.refresh();
-        compositor.state.forget_dead_windows();
         compositor.state.popups.cleanup();
         if let Err(err) = compositor.display.flush_clients() {
             warn!("client flush failed: {err}");

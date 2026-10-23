@@ -17,7 +17,6 @@ pub mod glass;
 pub mod glass_profile;
 pub mod renderer;
 pub mod shadow;
-pub mod sprite;
 pub mod title;
 pub mod titlebar;
 

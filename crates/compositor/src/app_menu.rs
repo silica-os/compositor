@@ -185,7 +185,7 @@ impl State {
             && let Some(toplevel) = window.toplevel()
             && let Some(client) = toplevel.wl_surface().client()
         {
-            let app = crate::panorama::window_app(&window).unwrap_or_default();
+            let app = crate::windows::window_app(&window).unwrap_or_default();
             return Some((app, client.id()));
         }
         let app = self.windowless_front.clone()?;
@@ -194,7 +194,7 @@ impl State {
             .iter()
             .chain(self.minimized.iter())
             .map(|(w, _)| w)
-            .find(|w| crate::panorama::window_app(w).as_deref() == Some(app.as_str()))
+            .find(|w| crate::windows::window_app(w).as_deref() == Some(app.as_str()))
             .and_then(|w| w.toplevel()?.wl_surface().client());
         let client = hidden.or_else(|| {
             self.desktop_layer()

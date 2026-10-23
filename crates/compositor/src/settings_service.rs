@@ -305,13 +305,13 @@ mod tests {
         assert_eq!(
             s.take(Event::Changed(
                 "hotcorners.topLeft".into(),
-                Setting::Text("panorama".into())
+                Setting::Text("launcher".into())
             )),
             ["hotcorners.topLeft"]
         );
         let changed = s.take(Event::All(BTreeMap::from([(
             "hotcorners.topLeft".to_owned(),
-            Setting::Text("panorama".into()),
+            Setting::Text("launcher".into()),
         )])));
         assert_eq!(changed, ["dock.titleBarDoubleClick"]);
     }

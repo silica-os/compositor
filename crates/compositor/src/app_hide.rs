@@ -2,13 +2,13 @@
 //! windows of a hidden app leave the screen at once, without an animation, and the app below
 //! comes to the front. They stay in the shell's window list (the Dock keeps the app's dot):
 //! activating one of them (the Dock, the app switcher, the Window menu) brings the whole app
-//! back. Minimized windows stay in the Dock; windows of the other spaces are not touched.
+//! back. Minimized windows stay in the Dock.
 
 use smithay::desktop::Window;
 use smithay::utils::{Logical, Point};
 
-use crate::panorama::window_app;
 use crate::state::State;
+use crate::windows::window_app;
 
 /// The windows of hidden apps, with the position they come back to.
 #[derive(Default)]

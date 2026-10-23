@@ -81,18 +81,6 @@ pub const SWITCHER_CANCEL: &str = "switcher.cancel";
 pub const SWITCHER_EXPOSE: &str = "switcher.expose";
 pub const CONTROLCENTER_TOGGLE: &str = "controlcenter.toggle";
 pub const SYSTEM_STATUS: &str = "system.status";
-pub const SPACE_LIST: &str = "space.list";
-pub const SPACE_NEXT: &str = "space.next";
-pub const SPACE_PREVIOUS: &str = "space.previous";
-pub const SPACE_GOTO: &str = "space.goto";
-pub const SPACE_ADD: &str = "space.add";
-pub const SPACE_REMOVE: &str = "space.remove";
-pub const WINDOW_MOVE_TO_SPACE: &str = "window.move_to_space";
-pub const PANORAMA_TOGGLE: &str = "panorama.toggle";
-pub const PANORAMA_STATE: &str = "panorama.state";
-pub const PANORAMA_SPACES_BAR: &str = "panorama.spaces_bar";
-pub const PANORAMA_APP: &str = "panorama.app";
-pub const DESKTOP_SHOW: &str = "desktop.show";
 pub const SYSTEM_WIFI: &str = "system.wifi";
 pub const SYSTEM_BLUETOOTH: &str = "system.bluetooth";
 pub const SYSTEM_VOLUME: &str = "system.volume";
@@ -148,15 +136,6 @@ impl CommandSpec {
 
 fn no_params() -> Value {
     json!({"type": "object", "properties": {}, "additionalProperties": false})
-}
-
-fn index_param() -> Value {
-    json!({
-        "type": "object",
-        "properties": {"index": {"type": "integer", "minimum": 0}},
-        "required": ["index"],
-        "additionalProperties": false
-    })
 }
 
 fn enabled_param() -> Value {
@@ -509,100 +488,6 @@ pub const CATALOG: &[CommandSpec] = &[
         id: CONTROLCENTER_TOGGLE,
         label: "Control Center",
         description: "Opens or closes the Control Center (shell component; icon in the bar).",
-        shortcut: None,
-        params: no_params,
-    },
-    CommandSpec {
-        id: SPACE_LIST,
-        label: "List spaces",
-        description: "The workspaces: which one is active and the window ids of each.",
-        shortcut: None,
-        params: no_params,
-    },
-    CommandSpec {
-        id: SPACE_NEXT,
-        label: "Next space",
-        description: "Moves to the space on the right (does nothing past the last one).",
-        shortcut: Some("Ctrl+Right"),
-        params: no_params,
-    },
-    CommandSpec {
-        id: SPACE_PREVIOUS,
-        label: "Previous space",
-        description: "Moves to the space on the left (does nothing before the first one).",
-        shortcut: Some("Ctrl+Left"),
-        params: no_params,
-    },
-    CommandSpec {
-        id: SPACE_GOTO,
-        label: "Go to space",
-        description: "Moves to space `index` (from 0).",
-        shortcut: None,
-        params: index_param,
-    },
-    CommandSpec {
-        id: SPACE_ADD,
-        label: "New space",
-        description: "Adds an empty space at the end; returns its index.",
-        shortcut: None,
-        params: no_params,
-    },
-    CommandSpec {
-        id: SPACE_REMOVE,
-        label: "Remove space",
-        description: "Removes space `index`; its windows move to the previous one.",
-        shortcut: None,
-        params: index_param,
-    },
-    CommandSpec {
-        id: WINDOW_MOVE_TO_SPACE,
-        label: "Move to space",
-        description: "Moves window `id` (or the focused one) to space `index`.",
-        shortcut: None,
-        params: || {
-            json!({
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer", "minimum": 0},
-                    "index": {"type": "integer", "minimum": 0}
-                },
-                "required": ["index"],
-                "additionalProperties": false
-            })
-        },
-    },
-    CommandSpec {
-        id: PANORAMA_TOGGLE,
-        label: "Panorama",
-        description: "Shows all the windows of the space side by side with the spaces bar at the top; if open, closes it.",
-        shortcut: Some("Ctrl+Up"),
-        params: no_params,
-    },
-    CommandSpec {
-        id: PANORAMA_APP,
-        label: "App windows",
-        description: "Shows the windows of the frontmost app in the middle, with the title below; if already open, closes it.",
-        shortcut: Some("Ctrl+Down"),
-        params: no_params,
-    },
-    CommandSpec {
-        id: DESKTOP_SHOW,
-        label: "Show desktop",
-        description: "Moves the windows off screen to show the desktop; again (or a click) puts them back.",
-        shortcut: Some("F11"),
-        params: no_params,
-    },
-    CommandSpec {
-        id: PANORAMA_SPACES_BAR,
-        label: "Spaces bar",
-        description: "With Panorama open, expands (`enabled`) or collapses the spaces bar with the thumbnails, like the pointer at the top.",
-        shortcut: None,
-        params: enabled_param,
-    },
-    CommandSpec {
-        id: PANORAMA_STATE,
-        label: "Panorama state",
-        description: "Whether Panorama is open, the animation progress (0–1) and the arranged window frames.",
         shortcut: None,
         params: no_params,
     },
@@ -1398,9 +1283,6 @@ pub struct WindowInfo {
     /// Full screen.
     #[serde(default)]
     pub fullscreen: bool,
-    /// The workspace of the window (from 0).
-    #[serde(default)]
-    pub space: usize,
 }
 
 /// A keyboard shortcut: modifiers plus the name of the xkb keysym.
@@ -1526,56 +1408,6 @@ pub struct AnimationScale {
     pub scale: f64,
 }
 
-/// Parameters of [`SPACE_GOTO`] and [`SPACE_REMOVE`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IndexParams {
-    pub index: usize,
-}
-
-/// Parameters of [`WINDOW_MOVE_TO_SPACE`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MoveToSpaceParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<u64>,
-    pub index: usize,
-}
-
-/// A window arranged in [`PANORAMA_STATE`] (logical points).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PanoramaWindow {
-    pub id: u64,
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-/// A rectangle in logical points.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PanoramaRect {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-/// Response of [`PANORAMA_STATE`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PanoramaState {
-    /// `panorama`, `app` (App Exposé) or `desktop` (Show Desktop); absent when closed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-    pub open: bool,
-    pub progress: f64,
-    pub windows: Vec<PanoramaWindow>,
-    /// Expansion of the spaces bar (0 compact, 1 expanded).
-    pub expansion: f64,
-    /// The space thumbnails, when visible.
-    pub thumbnails: Vec<PanoramaRect>,
-}
-
 /// Parameters of [`INPUT_GESTURE`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1592,15 +1424,6 @@ pub struct GestureParams {
     pub scale: Option<f64>,
     #[serde(default)]
     pub cancelled: bool,
-}
-
-/// A space in [`SPACE_LIST`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpaceInfo {
-    pub index: usize,
-    pub active: bool,
-    /// Window ids, from bottom to top.
-    pub windows: Vec<u64>,
 }
 
 /// Parameters of [`SYSTEM_WIFI`], [`SYSTEM_BLUETOOTH`], [`SYSTEM_MUTE`], [`SYSTEM_DND`].

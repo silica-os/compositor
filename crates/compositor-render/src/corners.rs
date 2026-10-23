@@ -3,7 +3,7 @@
 
 use smithay::backend::renderer::Frame;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
-use smithay::backend::renderer::element::utils::{CropRenderElement, RescaleRenderElement};
+use smithay::backend::renderer::element::utils::RescaleRenderElement;
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};
 use smithay::backend::renderer::gles::{Uniform, UniformValue};
 use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
@@ -81,9 +81,6 @@ pub struct RoundedSurface {
     /// Output size in physical pixels, before the frame transform.
     output: Size<i32, Physical>,
     program: Option<Program>,
-    /// The cell this surface is clipped to ([`RoundedSurface::cropped`]), in the same
-    /// space as the element geometry.
-    crop: Option<(Rectangle<i32, Physical>, f64)>,
 }
 
 impl RoundedSurface {
@@ -102,32 +99,6 @@ impl RoundedSurface {
             scale,
             output,
             program,
-            crop: None,
-        }
-    }
-
-    /// The surface clipped to `cell` (a space thumbnail). The crop-aware variant: the frame
-    /// then draws the cropped geometry, so the shift of the corner shader is measured from
-    /// where the cropped element starts, not from the whole surface. `None` when nothing is
-    /// left inside the cell.
-    pub fn cropped(
-        mut self,
-        scale: f64,
-        cell: Rectangle<i32, Physical>,
-    ) -> Option<CropRenderElement<RoundedSurface>> {
-        self.crop = Some((cell, scale));
-        CropRenderElement::from_element(self, scale, cell)
-    }
-
-    /// Where the frame draws the element when nothing moves it: the geometry, cropped.
-    fn drawn_origin(&self) -> Point<i32, Physical> {
-        let Some((cell, scale)) = self.crop else {
-            return self.inner.geometry(Scale::from(self.scale)).loc;
-        };
-        let geometry = self.inner.geometry(Scale::from(scale));
-        match geometry.intersection(cell) {
-            Some(cropped) => cropped.loc,
-            None => geometry.loc,
         }
     }
 
@@ -290,7 +261,7 @@ impl RenderElement<SilicaRenderer> for RoundedSurface {
         damage: &[Rectangle<i32, Physical>],
         opaque_regions: &[Rectangle<i32, Physical>],
     ) -> Result<(), SilicaError> {
-        let shift = self.drawn_origin() - dst.loc;
+        let shift = self.inner.geometry(Scale::from(self.scale)).loc - dst.loc;
         let corners = Rounding {
             window: self.window,
             radius: self.radius,

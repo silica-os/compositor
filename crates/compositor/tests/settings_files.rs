@@ -405,20 +405,31 @@ fn hot_corners_run_their_action_when_the_pointer_arrives() {
             .call("input.pointer_move", json!({"x": x, "y": y}))
             .unwrap();
     };
-    let open = |client: &mut silica_control::Client| {
-        client.call("panorama.state", Value::Null).unwrap()["open"] == true
-    };
+    // An app's menu is open: the launcher, like every shell panel, ends it.
+    let mut window = common::client::TestWindow::open(&compositor.wayland, "menu");
+    let frame = &client.call("window.list", Value::Null).unwrap()[0];
+    let at = (
+        frame["x"].as_f64().unwrap_or_default() + 20.0,
+        frame["y"].as_f64().unwrap_or_default() + 20.0,
+    );
+    client
+        .call(
+            "input.click",
+            json!({"x": at.0, "y": at.1, "button": "right"}),
+        )
+        .unwrap();
+    window.open_grabbing_popup((5, 5), (40, 30));
     // By default, the corner does nothing.
     pointer(&mut client, 160.0, 120.0);
     pointer(&mut client, 0.0, 0.0);
-    assert!(!open(&mut client));
-    bus.set("hotcorners.topLeft", Variant::from("panorama"));
+    assert!(!window.popup_done());
+    bus.set("hotcorners.topLeft", Variant::from("launcher"));
     // Applied as it lands: arrive again until the corner is armed with its action.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         pointer(&mut client, 160.0, 120.0);
         pointer(&mut client, 0.0, 0.0);
-        if open(&mut client) {
+        if window.popup_done() {
             break;
         }
         assert!(

@@ -32,6 +32,18 @@ pub fn is_fullscreen(window: &Window) -> bool {
     })
 }
 
+/// The app of a window (xdg-toplevel `app_id`).
+pub fn window_app(window: &Window) -> Option<String> {
+    let toplevel = window.toplevel()?;
+    smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().ok())
+            .and_then(|data| data.app_id.clone())
+    })
+}
+
 /// An arrangement of the green button's popover (windows.md, W-08): a half of the usable area
 /// or all of it, to the exact frame with no margins (BACKLOG-1 / W-08).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,7 +261,7 @@ impl State {
         let icon = self
             .dock_config
             .minimize_to_app
-            .then(|| crate::panorama::window_app(window))
+            .then(|| window_app(window))
             .flatten()
             .and_then(|app| {
                 self.dock_icons
@@ -354,7 +366,7 @@ impl State {
             return;
         };
         self.withdraw_toplevel(&entry.0);
-        let app = crate::panorama::window_app(&entry.0);
+        let app = window_app(&entry.0);
         // Another window of the app (its Get Info, #146) takes the focus it had.
         let next = if focused {
             self.next_focus_after(&entry.0, None)
@@ -439,21 +451,18 @@ impl State {
         self.focus_window(Some(window));
     }
 
-    /// Full screen on the output as a space of its own, or back to the previous geometry.
-    pub fn toggle_fullscreen(&mut self, window: &Window) -> Result<(), String> {
-        self.toggle_fullscreen_as(window, true)
-    }
-
     /// The app asks for full screen or leaves it (`xdg_toplevel.set_fullscreen`, a slideshow,
-    /// #173): the window fills the output where it is, not in a space of its own.
+    /// #173).
     pub fn set_fullscreen_in_place(&mut self, window: &Window, on: bool) -> Result<(), String> {
         if is_fullscreen(window) == on {
             return Ok(());
         }
-        self.toggle_fullscreen_as(window, false)
+        self.toggle_fullscreen(window)
     }
 
-    fn toggle_fullscreen_as(&mut self, window: &Window, own_space: bool) -> Result<(), String> {
+    /// Full screen on the output, or back to the previous geometry. The window fills the output
+    /// where it is: a space of its own belongs to the Dock, as on macOS.
+    pub fn toggle_fullscreen(&mut self, window: &Window) -> Result<(), String> {
         let toplevel = window.toplevel().ok_or("window without a toplevel")?;
         window
             .user_data()
@@ -467,9 +476,6 @@ impl State {
             .output_geometry(&self.output)
             .ok_or("output without geometry")?;
         if is_fullscreen(window) {
-            // Leaving full screen: back to the space before the full-screen one, which goes
-            // once the scroll has left it.
-            let owned = self.owned_space(window);
             let previous = before.0.take();
             let frame = before.1.take();
             toplevel.with_pending_state(|state| {
@@ -482,15 +488,6 @@ impl State {
             }
             if let Some(frame) = frame {
                 self.start_morph(window, output.to_f64(), frame, MorphKind::Exit);
-            }
-            if let Some(index) = owned {
-                let target = index.saturating_sub(1);
-                self.move_window_to_space(window, target)?;
-                self.workspaces.pending_removal = Some(window.clone());
-                if !self.switch_space(target, std::time::Instant::now()) {
-                    self.settle_transition();
-                }
-                self.focus_window(Some(window.clone()));
             }
         } else {
             let current = self
@@ -507,26 +504,7 @@ impl State {
             });
             toplevel.send_pending_configure();
             self.space.map_element(window.clone(), output.loc, true);
-            if !own_space {
-                self.focus_window(Some(window.clone()));
-                return Ok(());
-            }
-            // A full-screen window is a space of its own, right after the one it came from.
-            let from = self.window_space(window).unwrap_or(self.workspaces.active);
-            match self.insert_space(from.saturating_add(1)) {
-                Ok(index) => {
-                    if let Some(slot) = self.workspaces.owners.get_mut(index) {
-                        *slot = Some(window.clone());
-                    }
-                    self.move_window_to_space(window, index)?;
-                    if !self.switch_space(index, std::time::Instant::now()) {
-                        self.settle_transition();
-                    }
-                    self.focus_window(Some(window.clone()));
-                }
-                // No room for another space: full screen in place.
-                Err(err) => tracing::info!("full screen: {err}"),
-            }
+            self.focus_window(Some(window.clone()));
         }
         Ok(())
     }
@@ -806,12 +784,12 @@ impl State {
         if let Some(parent) = parent.as_ref().and_then(on_screen) {
             return Some(parent);
         }
-        let app = crate::panorama::window_app(closing)?;
+        let app = window_app(closing)?;
         self.space
             .elements()
             .rev()
             .filter(|w| *w != closing)
-            .find(|w| crate::panorama::window_app(w).as_deref() == Some(app.as_str()))
+            .find(|w| window_app(w).as_deref() == Some(app.as_str()))
             .cloned()
     }
 

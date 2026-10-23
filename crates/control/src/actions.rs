@@ -3,8 +3,8 @@
 //! `$XDG_RUNTIME_DIR/silica/actions-<wayland display>.sock` (mode 0600, the user only; one per
 //! compositor, so nested and headless sessions don't collide) and accepts only the
 //! commands in [`ACTIONS`], with the control channel's JSON lines. `silica-action` is its
-//! client: the Apps, Mission Control and Screenshot applications are
-//! `silica-action launcher.toggle`, `panorama.toggle` and `screenshot.toolbar`.
+//! client: the Apps and Screenshot applications are `silica-action launcher.toggle` and
+//! `screenshot.toolbar`.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::commands::{
     CONTROLCENTER_TOGGLE, FARO_TOGGLE, LAUNCHER_TOGGLE, NOTIFICATIONS_TOGGLE,
-    OUTPUT_COLOR_TEMPERATURE, OUTPUT_CONFIGURE, OUTPUT_LIST, PANORAMA_TOGGLE, SCREENSHOT_SCREEN,
+    OUTPUT_COLOR_TEMPERATURE, OUTPUT_CONFIGURE, OUTPUT_LIST, SCREENSHOT_SCREEN,
     SCREENSHOT_SCREEN_CLIPBOARD, SCREENSHOT_SELECTION, SCREENSHOT_SELECTION_CLIPBOARD,
     SCREENSHOT_TOOLBAR,
 };
@@ -31,7 +31,6 @@ pub const ACTIONS: &[&str] = &[
     SCREENSHOT_SCREEN_CLIPBOARD,
     SCREENSHOT_SELECTION,
     SCREENSHOT_SELECTION_CLIPBOARD,
-    PANORAMA_TOGGLE,
     NOTIFICATIONS_TOGGLE,
     CONTROLCENTER_TOGGLE,
     // For silica-daemon's System1, which gives apps (Settings) the displays and the night light.

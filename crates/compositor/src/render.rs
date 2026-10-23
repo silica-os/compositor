@@ -21,8 +21,8 @@ use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
 use smithay::backend::renderer::element::texture::TextureRenderElement;
-use smithay::backend::renderer::element::utils::{CropRenderElement, RescaleRenderElement};
-use smithay::backend::renderer::element::{AsRenderElements, Element, Id, Kind};
+use smithay::backend::renderer::element::utils::RescaleRenderElement;
+use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{Renderer, Texture};
 use smithay::desktop::{LayerSurface, Space, Window, layer_map_for_output};
@@ -53,88 +53,10 @@ render_elements! {
     Memory=MemoryRenderBufferRenderElement<SilicaRenderer>,
     /// A window minimizing into the Dock or coming out of it, deformed as a genie.
     Genie=compositor_render::genie::GenieElement,
-    /// The black band between two scrolling spaces.
+    /// The window screenshot veil.
     Solid=SolidColorRenderElement,
-    /// A space's desktop wallpaper shrunk into its thumbnail in the spaces bar.
-    /// The elements of a window inside a space thumbnail, clipped to its cell (#181).
-    CroppedSurface=CropRenderElement<WaylandSurfaceRenderElement<SilicaRenderer>>,
-    CroppedRounded=CropRenderElement<RoundedSurface>,
-    CroppedShader=CropRenderElement<RescaleRenderElement<ShaderElement>>,
-    CroppedTexture=CropRenderElement<RescaleRenderElement<TextureRenderElement<SilicaTexture>>>,
-    Thumbnail=CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<SilicaRenderer>>>,
-    /// A blurred capture: the Panorama wallpaper, the spaces bar material.
-    Blurred=compositor_render::backdrop::BlurredElement,
     /// The whole frame zoomed or filtered (`accessibility.rs`).
     Filtered=compositor_render::filter::FilterElement,
-}
-
-/// The glass of the spaces bar (Glass/Regular, over the wallpaper only), between frames.
-#[derive(Default)]
-struct BarGlass(GlassCache);
-
-/// The opacity of a shell layer while Panorama is open: the menu bar and the desktop (its
-/// icons) fade out as Panorama opens and come back as it closes (`missioncontrol.md`: in
-/// Mission Control the menu bar and what is on the desktop disappear, the Dock stays).
-fn layer_alpha_in_panorama(namespace: &str, mode: crate::panorama::Mode, progress: f64) -> f32 {
-    use crate::panorama::Mode;
-    let fades = match mode {
-        Mode::Panorama => namespace == "menubar" || namespace.starts_with("desktop-icons"),
-        Mode::App => namespace == "menubar",
-        Mode::Desktop => false,
-    };
-    if fades {
-        (1.0 - progress).clamp(0.0, 1.0) as f32
-    } else {
-        1.0
-    }
-}
-
-/// Shrinks an element drawn at output size (origin `origin`) by `factor` around that origin
-/// and clips it to `cell`, the thumbnail in physical pixels. `None` when nothing is left.
-fn fit_into_thumbnail<E: Element>(
-    element: E,
-    origin: Point<i32, Physical>,
-    factor: f64,
-    cell: Rectangle<i32, Physical>,
-    scale: f64,
-) -> Option<CropRenderElement<RescaleRenderElement<E>>> {
-    CropRenderElement::from_element(
-        RescaleRenderElement::from_element(element, origin, factor),
-        scale,
-        cell,
-    )
-}
-
-/// Clips the elements of a window to `cell` (physical pixels): what is left outside, the
-/// shadow included, is not drawn. What the clip does not cover (glass, genies...) is not
-/// part of a window drawn in a thumbnail and is dropped.
-fn crop_window_elements(
-    elements: Vec<OutputElement>,
-    scale: f64,
-    cell: Rectangle<i32, Physical>,
-) -> Vec<OutputElement> {
-    elements
-        .into_iter()
-        .filter_map(|element| match element {
-            OutputElement::Surface(e) => {
-                CropRenderElement::from_element(e, scale, cell).map(OutputElement::CroppedSurface)
-            }
-            OutputElement::Rounded(e) => e.cropped(scale, cell).map(OutputElement::CroppedRounded),
-            OutputElement::Shader(e) => {
-                CropRenderElement::from_element(e, scale, cell).map(OutputElement::CroppedShader)
-            }
-            OutputElement::Texture(e) => {
-                CropRenderElement::from_element(e, scale, cell).map(OutputElement::CroppedTexture)
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// The layers that belong to the space and scroll with it: the wallpaper and the menu bar
-/// (in the reference the Dock and the shell panels stay still).
-fn moves_with_space(layer: &LayerSurface, level: Layer) -> bool {
-    matches!(level, Layer::Background | Layer::Bottom) || layer.namespace() == "menubar"
 }
 
 /// What the frame needs besides the space.
@@ -153,12 +75,6 @@ pub struct RenderContext<'a> {
     pub glass_quality: GlassQuality,
     /// How tinted the glass is (Settings › Appearance › Glass, 0–1).
     pub glass_level: f32,
-    /// Space switch in progress: wallpaper and menu bar scroll with the windows.
-    pub space_shift: Option<crate::workspaces::SpaceShift>,
-    /// Panorama open or closing: arranged windows, spaces bar.
-    pub panorama: Option<crate::panorama::PanoramaView>,
-    /// Number of spaces and active space, for Panorama's bar.
-    pub spaces: (usize, usize),
     /// Dark appearance: windows, bars, shadows and glass.
     pub dark: bool,
     /// The icon of a drag between apps and the pointer position: above everything.
@@ -204,9 +120,6 @@ struct ButtonsLook {
     symbols: f32,
     pressed: Option<u8>,
     alt: bool,
-    /// The window dragged in Panorama: it casts the active window's shadow, scaled with it
-    /// (BACKLOG-1 / #74).
-    lifted: bool,
 }
 
 /// The buttons that make no sense: minimize and full screen for a dialog (it has a parent),
@@ -422,88 +335,6 @@ fn morph_rect(window: &Window, context: &RenderContext<'_>) -> Option<Rectangle<
     rect
 }
 
-/// Stable id of the black band, in the output data.
-struct SpaceGapId(Id);
-
-impl Default for SpaceGapId {
-    fn default() -> Self {
-        Self(Id::new())
-    }
-}
-
-/// The gradient at the top of App Exposé, in the output data.
-#[derive(Default)]
-struct AppShade(compositor_render::sprite::Sprite);
-
-/// App Exposé's label of a window, in its data.
-#[derive(Default)]
-struct AppLabel(compositor_render::sprite::Sprite);
-
-/// The titles of App Exposé's windows, below the arranged frames.
-fn app_labels(
-    renderer: &mut SilicaRenderer,
-    elements: &mut Vec<OutputElement>,
-    panorama: &crate::panorama::PanoramaView,
-    scale: f64,
-) {
-    use compositor_render::sprite::{Weight, text_width};
-    let size = crate::panorama::APP_LABEL_SIZE;
-    for placement in &panorama.placements {
-        let title = window_title(&placement.window);
-        if title.is_empty() {
-            continue;
-        }
-        let rect = crate::panorama::interpolate(placement, panorama.progress);
-        let width = f64::from(text_width(&title, size, Weight::Regular)).ceil() + 4.0;
-        let height = f64::from(size) + 8.0;
-        // Capitals (~9 pt) starting 14 pt below the frame.
-        let baseline = f64::from(size) * 0.75 + 2.0;
-        let location = Point::from((
-            rect.loc.x + (rect.size.w - width) / 2.0,
-            rect.loc.y + rect.size.h + crate::panorama::APP_LABEL_GAP + 9.0 - baseline,
-        ));
-        placement
-            .window
-            .user_data()
-            .insert_if_missing(AppLabel::default);
-        let Some(label) = placement.window.user_data().get::<AppLabel>() else {
-            continue;
-        };
-        let element = label.0.element(
-            renderer,
-            &title,
-            Size::from((width, height)),
-            location,
-            scale,
-            panorama.progress as f32,
-            |canvas| {
-                // White with a dark shadow below.
-                canvas.text(
-                    [2.0, baseline as f32 + 1.0],
-                    &title,
-                    size,
-                    Weight::Regular,
-                    [0, 0, 0, 90],
-                );
-                canvas.text(
-                    [2.0, baseline as f32],
-                    &title,
-                    size,
-                    Weight::Regular,
-                    [0xfe, 0xfe, 0xfe, 0xff],
-                );
-            },
-        );
-        if let Some(element) = element {
-            elements.push(OutputElement::Texture(RescaleRenderElement::from_element(
-                element,
-                Point::default(),
-                1.0,
-            )));
-        }
-    }
-}
-
 /// When the window showed its first buffer: the opening starts from there.
 #[derive(Default)]
 struct Opened(Cell<Option<Instant>>);
@@ -514,8 +345,6 @@ struct GlassAnchor {
     surface: WlSurface,
     /// Origin of the surface in the output, in physical pixels.
     origin: Point<i32, Physical>,
-    /// Opacity of the layer (the menu bar fades with Panorama).
-    opacity: f32,
     /// The regions committed with the buffer on screen, when they are not the current ones
     /// (a layer resizing keeps its old buffer and its old glass, `layers::drawn_layer`).
     glass: Option<Vec<crate::glass::GlassRegion>>,
@@ -606,12 +435,6 @@ fn fit(from: Rectangle<f64, Logical>, to: Rectangle<f64, Logical>) -> (Point<i32
         1.0
     };
     (offset, factor)
-}
-
-/// Whether the window casts the active shadow: the active window, and the one dragged in
-/// Panorama.
-fn shadow_active(active: bool, look: ButtonsLook) -> bool {
-    active || look.lifted
 }
 
 /// An app popup of a window (a menu, a popover): drawn above the window, with the glass it
@@ -705,40 +528,6 @@ fn surface_popup_layers(
 /// `offset` and scaled by `factor` around the center of the frame.
 #[allow(clippy::too_many_arguments)]
 fn window_elements(
-    renderer: &mut SilicaRenderer,
-    shaders: &compositor_render::Shaders,
-    (location, geometry): (Point<i32, Logical>, Rectangle<i32, Logical>),
-    window: &Window,
-    output_origin: Point<i32, Logical>,
-    output_size: Size<i32, Physical>,
-    scale: f64,
-    offset: Point<i32, Logical>,
-    factor: f64,
-    buttons: ButtonsLook,
-    system_dark: bool,
-    crop: Option<Rectangle<i32, Physical>>,
-) -> Vec<OutputElement> {
-    let elements = window_elements_uncropped(
-        renderer,
-        shaders,
-        (location, geometry),
-        window,
-        output_origin,
-        output_size,
-        scale,
-        offset,
-        factor,
-        buttons,
-        system_dark,
-    );
-    match crop {
-        Some(cell) => crop_window_elements(elements, scale, cell),
-        None => elements,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn window_elements_uncropped(
     renderer: &mut SilicaRenderer,
     shaders: &compositor_render::Shaders,
     (location, geometry): (Point<i32, Logical>, Rectangle<i32, Logical>),
@@ -862,7 +651,7 @@ fn window_elements_uncropped(
         }
     }
     if let Some(program) = shaders.shadow {
-        let style = compositor_render::shadow::style(shadow_active(active, buttons), dark);
+        let style = compositor_render::shadow::style(active, dark);
         window.user_data().insert_if_missing(WindowShadow::default);
         if let Some(shadow) = window.user_data().get::<WindowShadow>() {
             elements.push(OutputElement::Shader(RescaleRenderElement::from_element(
@@ -961,7 +750,6 @@ pub fn snapshot_window(
         1.0,
         ButtonsLook::default(),
         dark,
-        None,
     );
     let bbox = elements
         .iter()
@@ -1049,61 +837,45 @@ pub fn output_elements(
             let Some(drawn) = crate::layers::drawn_layer(&layer_map, layer, layers_output) else {
                 continue;
             };
-            // During a space switch the space layers are drawn twice: with the desktop
-            // leaving and with the one entering.
-            let offsets: Vec<f64> = match context.space_shift {
-                Some(shift) if moves_with_space(layer, level) => {
-                    vec![shift.outgoing, shift.incoming]
-                }
-                _ => vec![0.0],
-            };
-            let alpha = context.panorama.as_ref().map_or(1.0, |panorama| {
-                layer_alpha_in_panorama(layer.namespace(), panorama.mode, panorama.progress)
-            });
-            for offset in offsets {
-                let location = (drawn.loc.to_f64() + Point::from((offset, 0.0)))
-                    .to_physical_precise_round(scale);
-                // The layer's menus and popovers (silica-os/silica-desktop#222) are in front of it,
-                // each with the glass it declares behind it.
-                for popup in surface_popup_layers(
-                    renderer,
-                    layer.wl_surface(),
-                    Point::default(),
-                    location,
-                    scale,
-                ) {
-                    elements.extend(popup.elements);
-                    anchors.push(GlassAnchor {
-                        index: elements.len(),
-                        surface: popup.surface,
-                        origin: popup.origin,
-                        opacity: alpha,
-                        glass: None,
-                        dark_from: Some(layer.wl_surface().clone()),
-                    });
-                }
-                elements.extend(
-                    AsRenderElements::<SilicaRenderer>::render_elements::<
-                        WaylandSurfaceRenderElement<SilicaRenderer>,
-                    >(
-                        layer as &LayerSurface,
-                        renderer,
-                        location,
-                        scale.into(),
-                        alpha,
-                    )
-                    .into_iter()
-                    .map(OutputElement::Surface),
-                );
+            let location = drawn.loc.to_f64().to_physical_precise_round(scale);
+            // The layer's menus and popovers (silica-os/silica-desktop#222) are in front of it,
+            // each with the glass it declares behind it.
+            for popup in surface_popup_layers(
+                renderer,
+                layer.wl_surface(),
+                Point::default(),
+                location,
+                scale,
+            ) {
+                elements.extend(popup.elements);
                 anchors.push(GlassAnchor {
                     index: elements.len(),
-                    surface: layer.wl_surface().clone(),
-                    origin: location,
-                    opacity: alpha,
-                    glass: drawn.glass.clone(),
-                    dark_from: None,
+                    surface: popup.surface,
+                    origin: popup.origin,
+                    glass: None,
+                    dark_from: Some(layer.wl_surface().clone()),
                 });
             }
+            elements.extend(
+                AsRenderElements::<SilicaRenderer>::render_elements::<
+                    WaylandSurfaceRenderElement<SilicaRenderer>,
+                >(
+                    layer as &LayerSurface,
+                    renderer,
+                    location,
+                    scale.into(),
+                    1.0,
+                )
+                .into_iter()
+                .map(OutputElement::Surface),
+            );
+            anchors.push(GlassAnchor {
+                index: elements.len(),
+                surface: layer.wl_surface().clone(),
+                origin: location,
+                glass: drawn.glass.clone(),
+                dark_from: None,
+            });
         }
     };
     push_layers(&mut elements, &mut anchors, renderer, Layer::Overlay);
@@ -1124,191 +896,6 @@ pub fn output_elements(
             WINDOW_VEIL,
             Kind::Unspecified,
         )));
-    }
-    // Panorama: the dragged window, the space thumbnails and the spaces bar, which comes
-    // down over the fading menu bar.
-    let mut bar_id: Option<Id> = None;
-    let mut zoom_wallpaper: Vec<OutputElement> = Vec::new();
-    let mut bar_behind: Option<OutputElement> = None;
-    if let Some(panorama) = &context.panorama {
-        let output_logical = output_size.to_f64().to_logical(scale);
-        if let Some((window, rect)) = &panorama.drag
-            && let Some(at) = placed(space, window)
-        {
-            let (offset, factor) = fit(frame_rect(window, at.1), *rect);
-            elements.extend(window_elements(
-                renderer,
-                &shaders,
-                at,
-                window,
-                output_origin,
-                output_size,
-                scale,
-                offset,
-                factor,
-                ButtonsLook {
-                    lifted: true,
-                    ..ButtonsLook::default()
-                },
-                context.dark,
-                None,
-            ));
-        }
-        // The close buttons, in front of the thumbnails.
-        let close_sprite = output
-            .user_data()
-            .get_or_insert(crate::panorama::CloseSprite::default);
-        if let Some(buttons) = crate::panorama::close_buttons_element(
-            renderer,
-            close_sprite,
-            &panorama.close_buttons,
-            output_logical.w,
-            scale,
-        ) {
-            elements.push(OutputElement::Texture(RescaleRenderElement::from_element(
-                buttons,
-                Point::default(),
-                1.0,
-            )));
-        }
-        // The ring and the title of the window under the pointer, in front of the windows.
-        if let Some(hover) = &panorama.hover_window {
-            let sprite = output
-                .user_data()
-                .get_or_insert(crate::panorama::HoverSprite::default);
-            if let Some(element) =
-                crate::panorama::hover_window_element(renderer, sprite, hover, scale)
-            {
-                elements.insert(
-                    0,
-                    OutputElement::Texture(RescaleRenderElement::from_element(
-                        element,
-                        Point::default(),
-                        1.0,
-                    )),
-                );
-            }
-        }
-        for thumbnail in &panorama.thumbnails {
-            let s = thumbnail.rect.size.w / output_logical.w.max(1.0);
-            for (window, location) in thumbnail.windows.iter().rev() {
-                let geometry = Rectangle::new(*location, window.geometry().size);
-                let frame = frame_rect(window, geometry);
-                let target = Rectangle::new(
-                    thumbnail.rect.loc + (frame.loc - output_origin.to_f64()).upscale(s),
-                    frame.size.upscale(s),
-                );
-                let (offset, factor) = fit(frame, target);
-                elements.extend(window_elements(
-                    renderer,
-                    &shaders,
-                    (*location, geometry),
-                    window,
-                    output_origin,
-                    output_size,
-                    scale,
-                    offset,
-                    factor,
-                    ButtonsLook::default(),
-                    context.dark,
-                    Some(thumbnail.rect.to_physical_precise_round(scale)),
-                ));
-            }
-            // The desktop wallpaper, small. The surface element keeps its buffer at the
-            // output size whatever scale it is created with (only the subsurface offsets
-            // follow it), so it is drawn at full size from the thumbnail corner, shrunk
-            // around that corner and clipped to the thumbnail.
-            let cell = thumbnail.rect.to_physical_precise_round(scale);
-            for layer in layer_map.layers_on(Layer::Background).rev() {
-                let Some(drawn) = crate::layers::drawn_layer(&layer_map, layer, layers_output)
-                else {
-                    continue;
-                };
-                let origin = thumbnail.rect.loc.to_physical_precise_round(scale);
-                let location = origin + drawn.loc.to_f64().to_physical_precise_round(scale);
-                elements.extend(
-                    AsRenderElements::<SilicaRenderer>::render_elements::<
-                        WaylandSurfaceRenderElement<SilicaRenderer>,
-                    >(
-                        layer as &LayerSurface,
-                        renderer,
-                        location,
-                        scale.into(),
-                        1.0,
-                    )
-                    .into_iter()
-                    .filter_map(|surface| fit_into_thumbnail(surface, origin, s, cell, scale))
-                    .map(OutputElement::Thumbnail),
-                );
-            }
-        }
-        // The space magnifying out of its thumbnail: its desktop wallpaper, behind its
-        // windows (inserted with the wallpaper below).
-        if let Some((_, rect)) = panorama.zoom {
-            let s = rect.size.w / output_logical.w.max(1.0);
-            let cell = rect.to_physical_precise_round(scale);
-            let origin = rect.loc.to_physical_precise_round(scale);
-            for layer in layer_map.layers_on(Layer::Background).rev() {
-                let Some(drawn) = crate::layers::drawn_layer(&layer_map, layer, layers_output)
-                else {
-                    continue;
-                };
-                let location = origin + drawn.loc.to_f64().to_physical_precise_round(scale);
-                zoom_wallpaper.extend(
-                    AsRenderElements::<SilicaRenderer>::render_elements::<
-                        WaylandSurfaceRenderElement<SilicaRenderer>,
-                    >(
-                        layer as &LayerSurface,
-                        renderer,
-                        location,
-                        scale.into(),
-                        1.0,
-                    )
-                    .into_iter()
-                    .filter_map(|surface| fit_into_thumbnail(surface, origin, s, cell, scale))
-                    .map(OutputElement::Thumbnail),
-                );
-            }
-        }
-        if panorama.mode == crate::panorama::Mode::App {
-            app_labels(renderer, &mut elements, panorama, scale);
-        }
-        let sprite = output
-            .user_data()
-            .get_or_insert(compositor_render::sprite::Sprite::default);
-        let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let look = crate::panorama::BarLook {
-            width: output_logical.w,
-            thumbnails: panorama.thumbnail_rects.clone(),
-            active: context.spaces.1,
-            plus: panorama.plus,
-            ghost: panorama.ghost,
-            ghost_pressed: panorama.ghost_pressed,
-            height: output_logical.h,
-            hidden: panorama.zoom.map(|(index, _)| index),
-            expansion: panorama.expansion,
-            backdrop: context.clear_color.map(to_u8),
-            labels: panorama.labels.clone(),
-            dark: context.dark,
-        };
-        if panorama.mode == crate::panorama::Mode::Panorama
-            && let Some(bar) =
-                crate::panorama::bar_element(renderer, sprite, &look, panorama.progress, scale)
-        {
-            bar_id = Some(bar.id().clone());
-            let bar = OutputElement::Texture(RescaleRenderElement::from_element(
-                bar,
-                Point::default(),
-                1.0,
-            ));
-            // A space magnifying out of its thumbnail comes out in front of the bar: the bar
-            // goes behind the windows, just above the wallpaper.
-            if panorama.zoom.is_some() {
-                bar_behind = Some(bar);
-            } else {
-                elements.push(bar);
-            }
-        }
     }
     let top_start = elements.len();
     push_layers(&mut elements, &mut anchors, renderer, Layer::Top);
@@ -1400,23 +987,6 @@ pub fn output_elements(
         .filter_map(crate::windows::parent_of)
         .collect();
     for window in space.elements().rev() {
-        // The window dragged in Panorama is already on top.
-        if context
-            .panorama
-            .as_ref()
-            .and_then(|p| p.drag.as_ref())
-            .is_some_and(|(dragged, _)| dragged == window)
-        {
-            continue;
-        }
-        // App Exposé: the windows of the other apps disappear.
-        if let Some(panorama) = &context.panorama
-            && panorama.mode == crate::panorama::Mode::App
-            && panorama.progress > 0.0
-            && !panorama.placements.iter().any(|p| &p.window == window)
-        {
-            continue;
-        }
         // A window coming out of the Dock shows only in the genie, until the end.
         if context.genies.iter().any(|genie| genie.hides(window)) {
             continue;
@@ -1431,22 +1001,11 @@ pub fn output_elements(
             offset = shift;
             factor *= scale;
         }
-        // In Panorama the frame goes from its position to the arranged one.
-        if let Some(panorama) = &context.panorama
-            && let Some(placement) = panorama.placements.iter().find(|p| &p.window == window)
-            && placement.from.size.w > 0.0
-        {
-            let now = crate::panorama::interpolate(placement, panorama.progress);
-            let (shift, scale) = fit(placement.from, now);
-            offset = shift;
-            factor *= scale;
-        }
         let buttons = match &context.buttons {
             Some(view) if &view.window == window => ButtonsLook {
                 symbols: view.symbols,
                 pressed: view.pressed,
                 alt: context.alt,
-                lifted: false,
             },
             _ => ButtonsLook::default(),
         };
@@ -1483,7 +1042,6 @@ pub fn output_elements(
                     index: elements.len(),
                     surface: layer.surface,
                     origin: layer.origin,
-                    opacity: 1.0,
                     glass: None,
                     dark_from: Some(toplevel.wl_surface().clone()),
                 });
@@ -1501,7 +1059,6 @@ pub fn output_elements(
             factor,
             buttons,
             context.dark,
-            None,
         ));
         if let Some(toplevel) = window.toplevel()
             && let Some(location) = space.element_location(window)
@@ -1511,7 +1068,6 @@ pub fn output_elements(
                 surface: toplevel.wl_surface().clone(),
                 origin: (location - window.geometry().loc - output_origin + offset)
                     .to_physical_precise_round(scale),
-                opacity: 1.0,
                 glass: None,
                 dark_from: None,
             });
@@ -1523,67 +1079,6 @@ pub fn output_elements(
     push_layers(&mut elements, &mut anchors, renderer, Layer::Bottom);
     let background_start = elements.len();
     push_layers(&mut elements, &mut anchors, renderer, Layer::Background);
-
-    // App Exposé: at the top the wallpaper darkens (above the wallpaper, below the windows).
-    if let Some(panorama) = &context.panorama
-        && panorama.mode == crate::panorama::Mode::App
-    {
-        let width = f64::from(output_size.w) / scale;
-        let shade = output.user_data().get_or_insert(AppShade::default);
-        if let Some(element) = shade.0.element(
-            renderer,
-            "shade",
-            Size::from((width, crate::panorama::APP_SHADE_HEIGHT)),
-            Point::default(),
-            scale,
-            panorama.progress as f32,
-            |canvas| {
-                let rows = crate::panorama::APP_SHADE_HEIGHT as usize;
-                for row in 0..rows {
-                    let t = 1.0 - row as f32 / rows as f32;
-                    let alpha = (crate::panorama::APP_SHADE_ALPHA * t * 255.0).round() as u8;
-                    canvas.fill_rect([0.0, row as f32, width as f32, 1.0], [0, 0, 0, alpha]);
-                }
-            },
-        ) {
-            elements.insert(
-                background_start,
-                OutputElement::Texture(RescaleRenderElement::from_element(
-                    element,
-                    Point::default(),
-                    1.0,
-                )),
-            );
-            for anchor in &mut anchors {
-                anchor.index = after_insert(anchor.index, background_start);
-            }
-        }
-    }
-
-    // The black band between the two desktops, below everything: the two desktops do not cover it.
-    // Before the bar backdrop, which must see it behind itself.
-    if let Some(shift) = context.space_shift {
-        let gap = Rectangle::<f64, Logical>::new(
-            (shift.gap, 0.0).into(),
-            (
-                f64::from(crate::workspaces::SPACE_GAP),
-                f64::from(output_size.h) / scale,
-            )
-                .into(),
-        )
-        .to_physical_precise_round(scale);
-        elements.push(OutputElement::Solid(SolidColorRenderElement::new(
-            output
-                .user_data()
-                .get_or_insert(SpaceGapId::default)
-                .0
-                .clone(),
-            gap,
-            CommitCounter::default(),
-            [0.0, 0.0, 0.0, 1.0],
-            Kind::Unspecified,
-        )));
-    }
 
     // With the menu bar, the gradient that compresses the highlights at the top of the wallpaper.
     let has_menubar = layer_map
@@ -1611,23 +1106,6 @@ pub fn output_elements(
             Err(err) => warn!("bar backdrop skipped: {err:?}"),
         }
     }
-    if let Some(bar) = bar_behind {
-        elements.insert(background_start, bar);
-        for anchor in &mut anchors {
-            anchor.index = after_insert(anchor.index, background_start);
-        }
-    }
-    // Above the blurred wallpaper, below the windows: the space magnifying out of its thumbnail.
-    let zoomed = zoom_wallpaper.len();
-    if zoomed > 0 {
-        elements.splice(background_start..background_start, zoom_wallpaper);
-        for anchor in &mut anchors {
-            for _ in 0..zoomed {
-                anchor.index = after_insert(anchor.index, background_start);
-            }
-        }
-    }
-
     // The glass from the back towards the front: a higher glass sees those below.
     if shaders.glass.is_some() {
         let output_rect = Rectangle::from_size(output_size);
@@ -1655,7 +1133,7 @@ pub fn output_elements(
                     // The kind's Amalfi material (the declared material only picks the kind
                     // when the region declares none).
                     material: region.kind().kind().material(dark),
-                    opacity: region.opacity as f32 * anchor.opacity,
+                    opacity: region.opacity as f32,
                     scale,
                     tip: match region.shape {
                         Shape::Rounded => None,
@@ -1716,56 +1194,6 @@ pub fn output_elements(
             }
         }
     }
-    // The spaces bar is Glass/Regular over the wallpaper under it (and only that: no windows, no
-    // Dock), just behind the bar's sprite.
-    if let Some(panorama) = &context.panorama
-        && let Some(id) = &bar_id
-        && shaders.glass.is_some()
-        && let Some(at) = elements.iter().position(|element| element.id() == id)
-    {
-        let width = f64::from(output_size.w) / scale;
-        let rect = crate::panorama::bar_material_rect(width, panorama.expansion, panorama.progress)
-            .to_physical_precise_round(scale);
-        let mut wallpaper: Vec<WaylandSurfaceRenderElement<SilicaRenderer>> = Vec::new();
-        for layer in layer_map.layers_on(Layer::Background).rev() {
-            let Some(drawn) = crate::layers::drawn_layer(&layer_map, layer, layers_output) else {
-                continue;
-            };
-            wallpaper.extend(AsRenderElements::<SilicaRenderer>::render_elements::<
-                WaylandSurfaceRenderElement<SilicaRenderer>,
-            >(
-                layer as &LayerSurface,
-                renderer,
-                drawn.loc.to_f64().to_physical_precise_round(scale),
-                scale.into(),
-                1.0,
-            ));
-        }
-        let region = crate::panorama::bar_region(
-            rect,
-            context.dark,
-            crate::panorama::bar_alpha(panorama.progress),
-            scale,
-        );
-        let cache = output.user_data().get_or_insert(BarGlass::default);
-        match cache.0.elements(
-            renderer,
-            &[region],
-            &wallpaper,
-            &wallpaper,
-            context.glass_quality,
-            Rectangle::from_size(output_size),
-            scale,
-            context.clear_color,
-        ) {
-            Ok(glass) => {
-                let glass: Vec<OutputElement> =
-                    glass.into_iter().rev().map(OutputElement::Glass).collect();
-                elements.splice(at + 1..at + 1, glass);
-            }
-            Err(err) => warn!("spaces bar glass skipped: {err:?}"),
-        }
-    }
     if let Some((icon, at)) = &context.drag_icon {
         let location = (*at - output_origin.to_f64()).to_physical_precise_round(scale);
         let icon: Vec<OutputElement> = render_elements_from_surface_tree(
@@ -1786,115 +1214,9 @@ pub fn output_elements(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ButtonsLook, MinimizeEffect, MorphKind, after_insert, scale_effect, shadow_active,
-    };
+    use super::{MinimizeEffect, MorphKind, after_insert, scale_effect};
     use smithay::utils::{Logical, Physical, Rectangle};
     use std::time::Instant;
-
-    /// Where the fitted wallpaper lands and the share of it that is visible.
-    type Fitted = (Rectangle<i32, Physical>, f64);
-
-    /// A layer at output size (like the desktop wallpaper) put in a space thumbnail.
-    fn wallpaper_in_thumbnail(
-        output: (f64, f64),
-        count: usize,
-        index: usize,
-        scale: f64,
-    ) -> (Rectangle<i32, Physical>, Option<Fitted>) {
-        use smithay::backend::renderer::element::solid::SolidColorRenderElement;
-        use smithay::backend::renderer::element::{Element, Id, Kind};
-        use smithay::backend::renderer::utils::CommitCounter;
-        use smithay::utils::{Point, Scale, Size};
-        let output = Size::<f64, Logical>::from(output);
-        let rects = crate::thumbnail_row::centered(count, output);
-        let thumb = rects[index];
-        let s = thumb.size.w / output.w;
-        let cell = thumb.to_physical_precise_round(scale);
-        let origin: Point<i32, Physical> = thumb.loc.to_physical_precise_round(scale);
-        let full = Rectangle::new(origin, output.to_physical_precise_round(scale));
-        let wallpaper = SolidColorRenderElement::new(
-            Id::new(),
-            full,
-            CommitCounter::default(),
-            [0.2, 0.3, 0.4, 1.0],
-            Kind::Unspecified,
-        );
-        let whole = wallpaper.src();
-        // How much of the wallpaper is visible: all of it, not its top-left corner.
-        let fitted = super::fit_into_thumbnail(wallpaper, origin, s, cell, scale).map(|e| {
-            let shown = e.src();
-            (
-                e.geometry(Scale::from(scale)),
-                (shown.size.w * shown.size.h) / (whole.size.w * whole.size.h),
-            )
-        });
-        (cell, fitted)
-    }
-
-    #[test]
-    fn the_wallpaper_of_a_space_shrinks_into_its_thumbnail() {
-        // One and several spaces, scale 1 and 2, 16:10 and 16:9 outputs.
-        for (output, scale) in [
-            ((1920.0, 1200.0), 1.0),
-            ((1920.0, 1200.0), 2.0),
-            ((2560.0, 1440.0), 1.0),
-            ((1280.0, 800.0), 1.5),
-        ] {
-            for count in [1, 2, 5, 16] {
-                for index in 0..count {
-                    let (cell, fitted) = wallpaper_in_thumbnail(output, count, index, scale);
-                    let Some((fitted, shown)) = fitted else {
-                        panic!("{output:?} ×{scale} {index}/{count}: nothing drawn");
-                    };
-                    assert!(
-                        cell.contains_rect(fitted),
-                        "{output:?} ×{scale} {index}/{count}: {fitted:?} outside {cell:?}"
-                    );
-                    // It fills the thumbnail (±1 px of rounding).
-                    assert!(
-                        (fitted.size.w - cell.size.w).abs() <= 1
-                            && (fitted.size.h - cell.size.h).abs() <= 1
-                            && fitted.loc == cell.loc,
-                        "{output:?} ×{scale} {index}/{count}: {fitted:?} instead of {cell:?}"
-                    );
-                    assert!(
-                        shown > 0.97,
-                        "{output:?} ×{scale} {index}/{count}: only {shown:.3} of the wallpaper"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn full_panorama_hides_the_menu_bar_and_the_desktop() {
-        use crate::panorama::Mode;
-        let alpha = super::layer_alpha_in_panorama;
-        for namespace in ["menubar", "desktop-icons:dev.frascella.Mustache"] {
-            assert_eq!(alpha(namespace, Mode::Panorama, 0.0), 1.0);
-            assert_eq!(alpha(namespace, Mode::Panorama, 0.25), 0.75);
-            assert_eq!(alpha(namespace, Mode::Panorama, 1.0), 0.0);
-        }
-        // The Dock and the wallpaper stay.
-        assert_eq!(alpha("dock", Mode::Panorama, 1.0), 1.0);
-        assert_eq!(alpha("wallpaper", Mode::Panorama, 1.0), 1.0);
-        // App Exposé hides only the menu bar, Show Desktop nothing.
-        assert_eq!(alpha("menubar", Mode::App, 1.0), 0.0);
-        assert_eq!(alpha("desktop-icons:x", Mode::App, 1.0), 1.0);
-        assert_eq!(alpha("menubar", Mode::Desktop, 1.0), 1.0);
-    }
-
-    #[test]
-    fn the_dragged_window_casts_the_active_shadow() {
-        let lifted = ButtonsLook {
-            lifted: true,
-            ..ButtonsLook::default()
-        };
-        assert!(shadow_active(false, lifted));
-        assert!(shadow_active(true, ButtonsLook::default()));
-        assert!(!shadow_active(false, ButtonsLook::default()));
-    }
 
     #[test]
     fn a_tiling_morph_ends_at_the_target_without_overshoot() {

@@ -161,10 +161,6 @@ pub fn tile(ms: f64) -> f64 {
     ease_out(((ms - TILE_START_MS) / (end - TILE_START_MS)).clamp(0.0, 1.0))
 }
 
-/// A window dropped back where it was in Panorama (BACKLOG-1 / #74): ~500 ms, ease-out, no
-/// overshoot.
-pub const PANORAMA_RETURN: Duration = Duration::from_millis(500);
-
 /// Cubic ease-out on [0, 1]: 1 − (1 − x)³. Monotonic, ends at exactly 1.
 pub fn ease_out(x: f64) -> f64 {
     1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3)

@@ -22,8 +22,8 @@ use common::Headless;
 use common::client::{APP_ID, PopupResult, TestWindow};
 use serde_json::{Value, json};
 use silica_control::commands::{
-    APP_HIDE, FARO_TOGGLE, INPUT_CLICK, LAUNCHER_TOGGLE, PANORAMA_TOGGLE, SESSION_LOCK, SPACE_ADD,
-    SPACE_NEXT, SWITCHER_NEXT, WINDOW_FOCUS, WINDOW_LIST, WINDOW_MINIMIZE, WindowInfo,
+    APP_HIDE, FARO_TOGGLE, INPUT_CLICK, LAUNCHER_TOGGLE, SESSION_LOCK, SWITCHER_NEXT, WINDOW_FOCUS,
+    WINDOW_LIST, WINDOW_MINIMIZE, WindowInfo,
 };
 use silica_protocols::shell::client::silica_shell_manager_v1::{self, SilicaShellManagerV1};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
@@ -489,23 +489,7 @@ fn the_app_switcher_ends_the_menu() {
 }
 
 #[test]
-fn a_space_change_ends_the_menu() {
-    let (compositor, mut shell, mut owner, _other) = setup("popup-space", "");
-    let mut c = compositor.client();
-    c.call(SPACE_ADD, Value::Null).unwrap();
-    c.call(SPACE_NEXT, Value::Null).unwrap();
-    assert!(shell.closed());
-    assert_eq!(owner.popup_results(), [PopupResult::Dismissed]);
-}
-
-#[test]
-fn mission_control_faro_and_the_launcher_end_the_menu() {
-    let (compositor, mut shell, mut owner, _other) = setup("popup-panorama", "");
-    compositor
-        .client()
-        .call(PANORAMA_TOGGLE, Value::Null)
-        .unwrap();
-    ended(&mut shell, &mut owner, "Mission Control");
+fn faro_and_the_launcher_end_the_menu() {
     for command in [FARO_TOGGLE, LAUNCHER_TOGGLE] {
         let (compositor, mut shell, mut owner, _other) = setup(&format!("popup-{command}"), "");
         compositor.client().call(command, Value::Null).unwrap();

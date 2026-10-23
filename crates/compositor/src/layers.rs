@@ -423,7 +423,7 @@ impl State {
             let running = self
                 .hidden
                 .iter()
-                .any(|(w, _)| crate::panorama::window_app(w).as_deref() == Some(app.as_str()));
+                .any(|(w, _)| crate::windows::window_app(w).as_deref() == Some(app.as_str()));
             if running {
                 self.set_windowless_front(Some(app));
                 return;
