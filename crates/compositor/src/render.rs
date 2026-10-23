@@ -1,16 +1,17 @@
-//! The list of the elements of an output with GLES: layers, windows and `compositor-render`
-//! effects, from the front to the back. With pixman (headless without EGL)
-//! `space_render_elements` is still used, without effects.
+//! The list of the elements of an output: layers, windows and `compositor-render` effects, from
+//! the front to the back, the same for GLES and the CPU renderer.
 
 use std::cell::Cell;
 use std::time::Instant;
 
 use compositor_render::animation;
 use compositor_render::border::WindowBorder;
+use compositor_render::cache::ShaderElement;
 use compositor_render::corners::{RoundedSurface, WindowSurface};
 use compositor_render::glass::{
     GlassCache, GlassElement, GlassQuality, PhysicalRegion, Tip, render_to_texture,
 };
+use compositor_render::renderer::{SilicaRenderer, SilicaTexture};
 use compositor_render::shadow::WindowShadow;
 use compositor_render::title::Title;
 use compositor_render::titlebar::{Titlebar, TitlebarState};
@@ -21,8 +22,6 @@ use smithay::backend::renderer::element::surface::{
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::utils::{CropRenderElement, RescaleRenderElement};
 use smithay::backend::renderer::element::{AsRenderElements, Element, Id, Kind};
-use smithay::backend::renderer::gles::element::PixelShaderElement;
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{Renderer, Texture};
 use smithay::desktop::{LayerSurface, Space, Window, layer_map_for_output};
@@ -39,31 +38,31 @@ use crate::decorations;
 use crate::glass::{Shape, current_regions};
 
 render_elements! {
-    pub OutputElement<=GlesRenderer>;
-    Surface=WaylandSurfaceRenderElement<GlesRenderer>,
+    pub OutputElement<=SilicaRenderer>;
+    Surface=WaylandSurfaceRenderElement<SilicaRenderer>,
     Rounded=RoundedSurface,
     /// Pixel-shader elements of the window: title bar and shadow.
-    Shader=RescaleRenderElement<PixelShaderElement>,
+    Shader=RescaleRenderElement<ShaderElement>,
     Glass=GlassElement,
     /// The gradient below the menu bar, above the desktop wallpaper.
     Tone=compositor_render::backdrop::ToneElement,
     /// Textures: bar titles, snapshots of closing windows.
-    Texture=RescaleRenderElement<TextureRenderElement<GlesTexture>>,
+    Texture=RescaleRenderElement<TextureRenderElement<SilicaTexture>>,
     /// A window minimizing into the Dock or coming out of it, deformed as a genie.
     Genie=compositor_render::genie::GenieElement,
     /// The black band between two scrolling spaces.
     Solid=SolidColorRenderElement,
     /// A space's desktop wallpaper shrunk into its thumbnail in the spaces bar.
     /// The elements of a window inside a space thumbnail, clipped to its cell (#181).
-    CroppedSurface=CropRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>,
+    CroppedSurface=CropRenderElement<WaylandSurfaceRenderElement<SilicaRenderer>>,
     CroppedRounded=CropRenderElement<RoundedSurface>,
-    CroppedShader=CropRenderElement<RescaleRenderElement<PixelShaderElement>>,
-    CroppedTexture=CropRenderElement<RescaleRenderElement<TextureRenderElement<GlesTexture>>>,
-    Thumbnail=CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>>,
+    CroppedShader=CropRenderElement<RescaleRenderElement<ShaderElement>>,
+    CroppedTexture=CropRenderElement<RescaleRenderElement<TextureRenderElement<SilicaTexture>>>,
+    Thumbnail=CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<SilicaRenderer>>>,
     /// A blurred capture: the Panorama wallpaper, the spaces bar material.
     Blurred=compositor_render::backdrop::BlurredElement,
     /// The whole frame zoomed or filtered (`accessibility.rs`).
-    Filtered=smithay::backend::renderer::gles::element::TextureShaderElement,
+    Filtered=compositor_render::filter::FilterElement,
 }
 
 /// The glass of the spaces bar (Glass/Regular, over the wallpaper only), between frames.
@@ -235,7 +234,7 @@ pub fn buttons_disabled(window: &Window) -> compositor_render::titlebar::Disable
 /// A closed window fading out: the snapshot of its last look.
 pub struct Closing {
     pub id: Id,
-    pub texture: GlesTexture,
+    pub texture: SilicaTexture,
     /// Where the snapshot is in the output, in physical pixels.
     pub bbox: Rectangle<i32, Physical>,
     /// Center of the frame, around which the window shrinks.
@@ -275,7 +274,7 @@ pub struct Genie {
     pub id: Id,
     /// It changes on every frame: the shape changes even if the snapshot is the same.
     pub commit: std::cell::Cell<smithay::backend::renderer::utils::CommitCounter>,
-    pub texture: GlesTexture,
+    pub texture: SilicaTexture,
     /// The snapshot in the output, in physical pixels.
     pub snapshot: Rectangle<i32, Physical>,
     /// The window frame (without shadow) and the thumbnail, in physical pixels.
@@ -439,7 +438,7 @@ struct AppLabel(compositor_render::sprite::Sprite);
 
 /// The titles of App Exposé's windows, below the arranged frames.
 fn app_labels(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     elements: &mut Vec<OutputElement>,
     panorama: &crate::panorama::PanoramaView,
     scale: f64,
@@ -624,7 +623,7 @@ struct PopupLayer {
 /// The popups of `window`, the front one first (a submenu above its menu). `render_location`
 /// is where the window's surface goes (see `window_elements_uncropped`).
 fn popup_layers(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     window: &Window,
     render_location: Point<i32, Physical>,
     scale: f64,
@@ -645,7 +644,7 @@ fn popup_layers(
 /// `inner` is the offset of the root's geometry in its surface (a window's), `render_location`
 /// where the root's surface goes.
 fn surface_popup_layers(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     root: &WlSurface,
     inner: Point<i32, Logical>,
     render_location: Point<i32, Physical>,
@@ -703,7 +702,7 @@ fn surface_popup_layers(
 /// `offset` and scaled by `factor` around the center of the frame.
 #[allow(clippy::too_many_arguments)]
 fn window_elements(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     shaders: &compositor_render::Shaders,
     (location, geometry): (Point<i32, Logical>, Rectangle<i32, Logical>),
     window: &Window,
@@ -737,7 +736,7 @@ fn window_elements(
 
 #[allow(clippy::too_many_arguments)]
 fn window_elements_uncropped(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     shaders: &compositor_render::Shaders,
     (location, geometry): (Point<i32, Logical>, Rectangle<i32, Logical>),
     window: &Window,
@@ -765,7 +764,7 @@ fn window_elements_uncropped(
             1.0,
             Kind::Unspecified,
         ),
-        None => window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+        None => window.render_elements::<WaylandSurfaceRenderElement<SilicaRenderer>>(
             renderer,
             render_location,
             scale.into(),
@@ -790,13 +789,13 @@ fn window_elements_uncropped(
                 scale_rect(frame_physical, center_f, factor),
                 scale * factor,
                 output_size,
-                shaders.corners.clone(),
+                shaders.corners,
             ))
         })
         .collect();
     let active = is_active(window);
     if decorations::is_server_side(window)
-        && let Some(program) = &shaders.titlebar
+        && let Some(program) = shaders.titlebar
     {
         let full_size = decorations::full_size_toolbar(window);
         window.user_data().insert_if_missing(Title::default);
@@ -844,7 +843,7 @@ fn window_elements_uncropped(
     }
     // The 1 pt rim (Line/Border), above the content.
     if let Some(style) = compositor_render::border::style(active, dark)
-        && let Some(program) = &shaders.border
+        && let Some(program) = shaders.border
     {
         window.user_data().insert_if_missing(WindowBorder::default);
         if let Some(border) = window.user_data().get::<WindowBorder>() {
@@ -858,7 +857,7 @@ fn window_elements_uncropped(
             );
         }
     }
-    if let Some(program) = &shaders.shadow {
+    if let Some(program) = shaders.shadow {
         let style = compositor_render::shadow::style(shadow_active(active, buttons), dark);
         window.user_data().insert_if_missing(WindowShadow::default);
         if let Some(shadow) = window.user_data().get::<WindowShadow>() {
@@ -874,7 +873,7 @@ fn window_elements_uncropped(
 
 /// The genie of a window still in the space, towards (or from) `target` in output points.
 pub fn snapshot_genie(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     space: &Space<Window>,
     output: &Output,
     window: &Window,
@@ -936,7 +935,7 @@ pub fn scale_effect(
 
 /// The snapshot of a window (surfaces, bar and shadow) for the closing animation.
 pub fn snapshot_window(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     space: &Space<Window>,
     output: &Output,
     window: &Window,
@@ -996,7 +995,7 @@ fn after_insert(index: usize, at: usize) -> usize {
 
 /// The output elements, from the front to the back.
 pub fn output_elements(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     space: &Space<Window>,
     output: &Output,
     context: &RenderContext<'_>,
@@ -1038,7 +1037,7 @@ pub fn output_elements(
         .unwrap_or_default();
     let push_layers = |elements: &mut Vec<OutputElement>,
                        anchors: &mut Vec<GlassAnchor>,
-                       renderer: &mut GlesRenderer,
+                       renderer: &mut SilicaRenderer,
                        level| {
         for layer in layer_map.layers_on(level).rev() {
             // Not before its first frame at the configured size (the Dock in the middle of
@@ -1080,8 +1079,8 @@ pub fn output_elements(
                     });
                 }
                 elements.extend(
-                    AsRenderElements::<GlesRenderer>::render_elements::<
-                        WaylandSurfaceRenderElement<GlesRenderer>,
+                    AsRenderElements::<SilicaRenderer>::render_elements::<
+                        WaylandSurfaceRenderElement<SilicaRenderer>,
                     >(
                         layer as &LayerSurface,
                         renderer,
@@ -1224,8 +1223,8 @@ pub fn output_elements(
                 let origin = thumbnail.rect.loc.to_physical_precise_round(scale);
                 let location = origin + drawn.loc.to_f64().to_physical_precise_round(scale);
                 elements.extend(
-                    AsRenderElements::<GlesRenderer>::render_elements::<
-                        WaylandSurfaceRenderElement<GlesRenderer>,
+                    AsRenderElements::<SilicaRenderer>::render_elements::<
+                        WaylandSurfaceRenderElement<SilicaRenderer>,
                     >(
                         layer as &LayerSurface,
                         renderer,
@@ -1252,8 +1251,8 @@ pub fn output_elements(
                 };
                 let location = origin + drawn.loc.to_f64().to_physical_precise_round(scale);
                 zoom_wallpaper.extend(
-                    AsRenderElements::<GlesRenderer>::render_elements::<
-                        WaylandSurfaceRenderElement<GlesRenderer>,
+                    AsRenderElements::<SilicaRenderer>::render_elements::<
+                        WaylandSurfaceRenderElement<SilicaRenderer>,
                     >(
                         layer as &LayerSurface,
                         renderer,
@@ -1380,7 +1379,7 @@ pub fn output_elements(
                 target: genie.target,
                 shape: genie.shape(context.now, context.animation_speed),
                 output: output_size,
-                program: genie_program.clone(),
+                program: genie_program,
             })
         {
             elements.insert(top_start, OutputElement::Genie(element));
@@ -1450,7 +1449,7 @@ pub fn output_elements(
         let Some(at) = placed(space, window) else {
             continue;
         };
-        if let (Some(program), Some(toplevel)) = (&shaders.border, window.toplevel())
+        if let (Some(program), Some(toplevel)) = (shaders.border, window.toplevel())
             && veiled.contains(toplevel.wl_surface())
         {
             window.user_data().insert_if_missing(SheetVeil::default);
@@ -1586,7 +1585,7 @@ pub fn output_elements(
     let has_menubar = layer_map
         .layers()
         .any(|layer| layer.namespace() == "menubar");
-    if has_menubar && let Some(program) = &shaders.tone {
+    if has_menubar && let Some(program) = shaders.tone {
         let backdrop = output
             .user_data()
             .get_or_insert(compositor_render::backdrop::Backdrop::default);
@@ -1626,7 +1625,7 @@ pub fn output_elements(
     }
 
     // The glass from the back towards the front: a higher glass sees those below.
-    if let Some(programs) = &shaders.glass {
+    if shaders.glass.is_some() {
         let output_rect = Rectangle::from_size(output_size);
         for anchor in anchors.iter().rev() {
             // The glass a window declares follows that window's appearance.
@@ -1690,7 +1689,6 @@ pub fn output_elements(
                 states.data_map.get::<GlassCache>().map(|cache| {
                     cache.elements(
                         renderer,
-                        programs,
                         &regions,
                         behind,
                         behind_static,
@@ -1718,19 +1716,19 @@ pub fn output_elements(
     // Dock), just behind the bar's sprite.
     if let Some(panorama) = &context.panorama
         && let Some(id) = &bar_id
-        && let Some(programs) = &shaders.glass
+        && shaders.glass.is_some()
         && let Some(at) = elements.iter().position(|element| element.id() == id)
     {
         let width = f64::from(output_size.w) / scale;
         let rect = crate::panorama::bar_material_rect(width, panorama.expansion, panorama.progress)
             .to_physical_precise_round(scale);
-        let mut wallpaper: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+        let mut wallpaper: Vec<WaylandSurfaceRenderElement<SilicaRenderer>> = Vec::new();
         for layer in layer_map.layers_on(Layer::Background).rev() {
             let Some(drawn) = crate::layers::drawn_layer(&layer_map, layer, layers_output) else {
                 continue;
             };
-            wallpaper.extend(AsRenderElements::<GlesRenderer>::render_elements::<
-                WaylandSurfaceRenderElement<GlesRenderer>,
+            wallpaper.extend(AsRenderElements::<SilicaRenderer>::render_elements::<
+                WaylandSurfaceRenderElement<SilicaRenderer>,
             >(
                 layer as &LayerSurface,
                 renderer,
@@ -1748,7 +1746,6 @@ pub fn output_elements(
         let cache = output.user_data().get_or_insert(BarGlass::default);
         match cache.0.elements(
             renderer,
-            programs,
             &[region],
             &wallpaper,
             &wallpaper,

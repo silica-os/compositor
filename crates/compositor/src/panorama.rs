@@ -1990,13 +1990,13 @@ pub fn draw_hover_window(canvas: &mut Canvas, hover: &HoverWindow) {
 
 /// The hovered window's ring and title as an element at the window.
 pub fn hover_window_element(
-    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    renderer: &mut compositor_render::renderer::SilicaRenderer,
     sprite: &HoverSprite,
     hover: &HoverWindow,
     scale: f64,
 ) -> Option<
     smithay::backend::renderer::element::texture::TextureRenderElement<
-        smithay::backend::renderer::gles::GlesTexture,
+        compositor_render::renderer::SilicaTexture,
     >,
 > {
     sprite.0.element(
@@ -2016,14 +2016,14 @@ pub struct HoverSprite(Sprite);
 
 /// The close buttons as an element over the whole bar.
 pub fn close_buttons_element(
-    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    renderer: &mut compositor_render::renderer::SilicaRenderer,
     sprite: &CloseSprite,
     buttons: &[CloseButton],
     width: f64,
     scale: f64,
 ) -> Option<
     smithay::backend::renderer::element::texture::TextureRenderElement<
-        smithay::backend::renderer::gles::GlesTexture,
+        compositor_render::renderer::SilicaTexture,
     >,
 > {
     if buttons.is_empty() {
@@ -2050,14 +2050,14 @@ pub struct CloseSprite(Sprite);
 
 /// The spaces bar as an element, already moved up as much as the opening needs.
 pub fn bar_element(
-    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    renderer: &mut compositor_render::renderer::SilicaRenderer,
     sprite: &Sprite,
     look: &BarLook,
     progress: f64,
     scale: f64,
 ) -> Option<
     smithay::backend::renderer::element::texture::TextureRenderElement<
-        smithay::backend::renderer::gles::GlesTexture,
+        compositor_render::renderer::SilicaTexture,
     >,
 > {
     sprite.element(

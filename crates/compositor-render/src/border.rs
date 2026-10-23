@@ -2,11 +2,11 @@
 //! Amalfi tokens (`#1D1E21` at 14 % in light, `#F4F5F7` at 16 % in dark), the same for an active
 //! and an inactive window (the kit's "Window rim" layer).
 
-use smithay::backend::renderer::gles::element::PixelShaderElement;
-use smithay::backend::renderer::gles::{GlesPixelProgram, Uniform, UniformType, UniformValue};
+use smithay::backend::renderer::gles::{Uniform, UniformType, UniformValue};
 use smithay::utils::{Logical, Size};
 
-use crate::cache::ShaderCache;
+use crate::Program;
+use crate::cache::{ShaderCache, ShaderElement};
 use crate::corners::{CORNER_EXPONENT, CORNER_RADIUS};
 
 /// The rim colour: sRGB 0-1 with straight alpha.
@@ -72,33 +72,33 @@ impl WindowBorder {
     /// The border element for a frame (logical, in the output).
     pub fn element(
         &self,
-        program: &GlesPixelProgram,
+        program: Program,
         frame: smithay::utils::Rectangle<i32, Logical>,
         style: BorderStyle,
         scale: f64,
-    ) -> PixelShaderElement {
+    ) -> ShaderElement {
         self.shape(program, frame, style, scale, false)
     }
 
     /// The veil element: the window's shape filled with `style`'s colour.
     pub fn veil_element(
         &self,
-        program: &GlesPixelProgram,
+        program: Program,
         frame: smithay::utils::Rectangle<i32, Logical>,
         style: BorderStyle,
         scale: f64,
-    ) -> PixelShaderElement {
+    ) -> ShaderElement {
         self.shape(program, frame, style, scale, true)
     }
 
     fn shape(
         &self,
-        program: &GlesPixelProgram,
+        program: Program,
         frame: smithay::utils::Rectangle<i32, Logical>,
         style: BorderStyle,
         scale: f64,
         fill: bool,
-    ) -> PixelShaderElement {
+    ) -> ShaderElement {
         let pixel = (1.0 / scale.max(1.0)) as f32;
         self.cache
             .element(program, frame, (frame.size, style, pixel.to_bits()), || {

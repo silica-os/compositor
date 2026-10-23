@@ -1,29 +1,28 @@
 //! The compositor's backends: headless (tests and CI) here and, in `drm.rs`, the real session.
 
+use compositor_raster::CpuRenderer;
+use compositor_render::renderer::{SilicaRenderer, SilicaTexture};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::pixman::PixmanRenderer;
 use smithay::backend::renderer::{Bind, Offscreen, Texture};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use std::time::{Duration, Instant};
 
 use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
-use smithay::reexports::pixman;
 use smithay::reexports::wayland_server::Display;
 use smithay::utils::{Buffer as BufferCoords, Rectangle, Size, Transform};
 use tracing::{info, warn};
 
-use crate::capture::{Capture, capture, capture_elements};
+use crate::capture::{Capture, capture_elements};
 use crate::egl::GpuTimer;
 use crate::perf::RenderStages;
 use crate::render::{OutputElement, RenderContext, output_elements};
 use crate::state::{Compositor, State};
 
 pub enum Backend {
-    /// No window: it draws only when a capture is needed, with GLES on an EGL device (the
-    /// GPU or llvmpipe) if there is one, otherwise with pixman.
+    /// No window: it draws only when a capture is needed (or on every tick, to measure), with
+    /// GLES on an EGL device (the GPU or llvmpipe) if there is one, otherwise on the CPU.
     Headless(Headless),
     /// The real session: DRM/KMS, libinput, libseat (`drm.rs`).
     #[cfg(feature = "drm")]
@@ -31,54 +30,41 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// The GLES renderer, if the backend has one (all except headless on pixman).
-    pub fn gles(&mut self) -> Option<&mut GlesRenderer> {
+    pub fn renderer(&mut self) -> &mut SilicaRenderer {
         match self {
-            Backend::Headless(Headless {
-                renderer: HeadlessRenderer::Gles(renderer),
-                ..
-            }) => Some(renderer.as_mut()),
-            Backend::Headless(Headless {
-                renderer: HeadlessRenderer::Pixman(_),
-                ..
-            }) => None,
+            Backend::Headless(headless) => &mut headless.renderer,
             #[cfg(feature = "drm")]
-            Backend::Drm(backend) => Some(&mut backend.renderer),
+            Backend::Drm(backend) => &mut backend.renderer,
         }
     }
 }
 
 pub struct Headless {
-    pub renderer: HeadlessRenderer,
+    pub renderer: SilicaRenderer,
     /// Present when every tick is drawn (`SILICA_COMPOSITOR_HEADLESS_FRAMES=1`).
     frames: Option<Box<HeadlessFrames>>,
-}
-
-pub enum HeadlessRenderer {
-    Gles(Box<GlesRenderer>),
-    Pixman(PixmanRenderer),
 }
 
 /// Headless drawing on every tick, to measure the renderer without a display: the damage of
 /// each frame goes into an offscreen canvas, as on DRM, and the frame counts in `perf.render`.
 struct HeadlessFrames {
     damage_tracker: OutputDamageTracker,
-    canvas: Option<GlesTexture>,
-    cursor: Option<GlesTexture>,
+    canvas: Option<SilicaTexture>,
+    cursor: Option<SilicaTexture>,
     timer: Option<GpuTimer>,
 }
 
 /// The headless renderer, from `SILICA_COMPOSITOR_HEADLESS_RENDERER`: GLES on llvmpipe (default),
-/// `gpu` for GLES on the GPU, `pixman` without GLES. If EGL is missing, pixman.
-fn headless_renderer() -> Result<HeadlessRenderer, Box<dyn std::error::Error>> {
+/// `gpu` for GLES on the GPU, `cpu` for the CPU renderer. If EGL is missing, the CPU.
+fn headless_renderer() -> SilicaRenderer {
     let choice = std::env::var("SILICA_COMPOSITOR_HEADLESS_RENDERER").unwrap_or_default();
-    if choice != "pixman" {
+    if choice != "cpu" {
         match crate::egl::headless_renderer(choice == "gpu") {
-            Ok(renderer) => return Ok(HeadlessRenderer::Gles(Box::new(renderer))),
-            Err(err) => warn!("headless without GLES, using pixman: {err}"),
+            Ok(renderer) => return renderer.into(),
+            Err(err) => warn!("headless without GLES, on the CPU: {err}"),
         }
     }
-    Ok(HeadlessRenderer::Pixman(PixmanRenderer::new()?))
+    CpuRenderer::new().into()
 }
 
 /// Refresh rate declared for the headless output, in millihertz.
@@ -106,7 +92,7 @@ pub fn init_headless(
     mut display: Display<State>,
     (width, height): (i32, i32),
 ) -> Result<Compositor, Box<dyn std::error::Error>> {
-    let mut renderer = headless_renderer()?;
+    let mut renderer = headless_renderer();
     let mode = Mode {
         size: (width, height).into(),
         refresh: HEADLESS_REFRESH_MHZ,
@@ -123,10 +109,7 @@ pub fn init_headless(
                 damage_tracker: OutputDamageTracker::from_output(&output),
                 canvas: None,
                 cursor: None,
-                timer: match &mut renderer {
-                    HeadlessRenderer::Gles(renderer) => GpuTimer::new(renderer),
-                    HeadlessRenderer::Pixman(_) => None,
-                },
+                timer: renderer.gles().and_then(GpuTimer::new),
             })
         });
     let mut state = State::new(
@@ -148,13 +131,7 @@ pub fn init_headless(
             data.state.signal_frame_barriers();
             TimeoutAction::ToDuration(HEADLESS_FRAME)
         })?;
-    if let Backend::Headless(Headless {
-        renderer: HeadlessRenderer::Gles(renderer),
-        ..
-    }) = &state.backend
-    {
-        state.software_renderer = is_software(renderer);
-    }
+    state.software_renderer = is_software(state.backend.renderer());
     info!("headless backend ready ({width}x{height})");
     Ok(Compositor { state, display })
 }
@@ -203,8 +180,8 @@ impl State {
         if !matches!(
             &self.backend,
             Backend::Headless(Headless {
-                renderer: HeadlessRenderer::Gles(_),
                 frames: Some(_),
+                ..
             })
         ) {
             return;
@@ -222,15 +199,14 @@ impl State {
         let scale = self.output.current_scale().fractional_scale();
         let accessibility = self.accessibility;
         let Backend::Headless(Headless {
-            renderer: HeadlessRenderer::Gles(renderer),
+            renderer,
             frames: Some(frames),
         }) = &mut self.backend
         else {
             return;
         };
-        let renderer = renderer.as_mut();
-        if let Some(timer) = &mut frames.timer {
-            timer.begin(renderer);
+        if let (Some(timer), Some(gles)) = (&mut frames.timer, renderer.gles()) {
+            timer.begin(gles);
         }
         let context = RenderContext {
             closing: &self.closing,
@@ -280,9 +256,9 @@ impl State {
                 false
             }
         };
-        if let Some(timer) = &mut frames.timer {
-            timer.end(renderer, drawn);
-            timer.collect(renderer, |time| self.perf.gpu_rendered(time));
+        if let (Some(timer), Some(gles)) = (&mut frames.timer, renderer.gles()) {
+            timer.end(gles, drawn);
+            timer.collect(gles, |time| self.perf.gpu_rendered(time));
         }
     }
 
@@ -290,27 +266,14 @@ impl State {
     pub fn screenshot(&mut self) -> Result<Capture, String> {
         let scene = self.scene_context(Instant::now());
         let clear = scene.clear_color;
-        if let Some(renderer) = self.backend.gles() {
-            let context = RenderContext {
-                closing: &self.closing,
-                genies: &self.genies,
-                ..scene
-            };
-            let elements = output_elements(renderer, &self.space, &self.output, &context);
-            return capture_elements::<_, GlesTexture, _>(renderer, &self.output, &elements, clear);
-        }
-        match &mut self.backend {
-            Backend::Headless(Headless {
-                renderer: HeadlessRenderer::Pixman(renderer),
-                ..
-            }) => capture::<_, pixman::Image<'static, 'static>>(
-                renderer,
-                &self.output,
-                &self.space,
-                self.clear_color,
-            ),
-            _ => Err("no renderer for the screenshot".to_owned()),
-        }
+        let renderer = self.backend.renderer();
+        let context = RenderContext {
+            closing: &self.closing,
+            genies: &self.genies,
+            ..scene
+        };
+        let elements = output_elements(renderer, &self.space, &self.output, &context);
+        capture_elements::<_, SilicaTexture, _>(renderer, &self.output, &elements, clear)
     }
 }
 
@@ -324,15 +287,13 @@ impl State {
         let _ = vt;
     }
 
-    /// The snapshot of the closing window, to fade it out (only with GLES).
+    /// The snapshot of the closing window, to fade it out.
     pub fn start_closing(&mut self, window: &smithay::desktop::Window) {
         if self.animation_speed <= 0.0 {
             return;
         }
         let dark = self.dark();
-        let Some(renderer) = self.backend.gles() else {
-            return;
-        };
+        let renderer = self.backend.renderer();
         let now = Instant::now();
         let speed = self.animation_speed;
         self.closing.retain(|closing| !closing.finished(now, speed));
@@ -356,9 +317,7 @@ impl State {
             return;
         };
         let dark = self.dark();
-        let Some(renderer) = self.backend.gles() else {
-            return;
-        };
+        let renderer = self.backend.renderer();
         let now = Instant::now();
         let speed = self.animation_speed;
         // A window has only one genie: the new one replaces the old one.
@@ -418,9 +377,7 @@ impl State {
     ) -> Result<(crate::capture::Capture, (f64, f64)), String> {
         use smithay::backend::renderer::ExportMem;
         let dark = self.dark();
-        let Some(renderer) = self.backend.gles() else {
-            return Err("window capture not available with pixman".to_owned());
-        };
+        let renderer = self.backend.renderer();
         let snapshot =
             crate::render::snapshot_window(renderer, &self.space, &self.output, window, dark)
                 .ok_or("window cannot be drawn")?;
@@ -538,10 +495,13 @@ pub fn shrink(pixels: &[u8], w: u32, h: u32, max: u32) -> Option<(u32, u32, Vec<
     Some((tw, th, out))
 }
 
-/// The renderer runs on a software rasterizer (EGL_MESA_device_software).
-fn is_software(renderer: &GlesRenderer) -> bool {
-    smithay::backend::egl::EGLDevice::device_for_display(renderer.egl_context().display())
-        .is_ok_and(|device| device.is_software())
+/// The renderer runs on the CPU: ours, or GLES on a software rasterizer
+/// (EGL_MESA_device_software).
+fn is_software(renderer: &SilicaRenderer) -> bool {
+    renderer.as_gles().is_none_or(|renderer| {
+        smithay::backend::egl::EGLDevice::device_for_display(renderer.egl_context().display())
+            .is_ok_and(|device| device.is_software())
+    })
 }
 
 impl State {
@@ -590,7 +550,7 @@ impl State {
 /// for the renderer to finish. It gives the time spent drawing and waiting, nothing when
 /// nothing changed.
 fn draw_headless(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     frames: &mut HeadlessFrames,
     output: &Output,
     elements: &[OutputElement],
@@ -604,7 +564,7 @@ fn draw_headless(
     let size = Size::<i32, BufferCoords>::from((mode.w, mode.h));
     let fresh = frames.canvas.as_ref().is_none_or(|c| c.size() != size);
     if fresh {
-        let canvas: GlesTexture = renderer
+        let canvas: SilicaTexture = renderer
             .create_buffer(Fourcc::Abgr8888, size)
             .map_err(|e| format!("canvas: {e}"))?;
         frames.canvas = Some(canvas);

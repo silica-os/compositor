@@ -1,4 +1,5 @@
-//! The compositor's GLES renderer and glass shaders.
+//! The compositor's renderers (GLES, or the CPU where there is no GPU), its effects and its
+//! glass.
 //!
 //! The effects are smithay render elements that the compositor puts in the output's list. The
 //! parameters come from the macOS 27 measurements in `plan/reference/`, cited next to every
@@ -13,36 +14,119 @@ pub mod filter;
 pub mod genie;
 pub mod glass;
 pub mod glass_profile;
+pub mod renderer;
 pub mod shadow;
 pub mod sprite;
 pub mod title;
 pub mod titlebar;
 
 use smithay::backend::renderer::gles::{
-    GlesPixelProgram, GlesRenderer, GlesTexProgram, UniformName, UniformType,
+    GlesFrame, GlesPixelProgram, GlesRenderer, GlesTexProgram, UniformName, UniformType,
 };
 use tracing::warn;
 
-/// The programs compiled for a renderer. If a shader does not compile, the effect is missing
-/// but the compositor keeps drawing (never crash).
-#[derive(Clone, Default)]
+use crate::renderer::SilicaRenderer;
+
+/// A program of the effects: a GLSL shader on GLES, its port on the CPU, both reading the same
+/// parameters (the shader's uniforms).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Program {
+    Corners,
+    Shadow,
+    Titlebar,
+    /// The 1 pt inner border of windows in dark.
+    Border,
+    /// The glass: its material, blur and resampling passes.
+    Glass,
+    Tone,
+    /// The funnel deformation of minimizing into the Dock.
+    Genie,
+    /// The Accessibility display filters (invert, grayscale, contrast).
+    Filter,
+}
+
+/// The effects a renderer draws. If a program is missing (a shader that does not compile, an
+/// effect the CPU renderer lacks), the effect is off but the compositor keeps drawing (never
+/// crash).
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Shaders {
+    pub corners: Option<Program>,
+    pub shadow: Option<Program>,
+    pub titlebar: Option<Program>,
+    pub border: Option<Program>,
+    pub glass: Option<Program>,
+    pub tone: Option<Program>,
+    pub genie: Option<Program>,
+    pub filter: Option<Program>,
+}
+
+/// The effects of `renderer`.
+pub fn shaders(renderer: &mut SilicaRenderer) -> Shaders {
+    match renderer {
+        SilicaRenderer::Gles(renderer) => gles_programs(renderer).available(),
+        SilicaRenderer::Cpu(_) => Shaders::default(),
+    }
+}
+
+/// The GLSL programs compiled for a GLES renderer.
+#[derive(Clone, Default)]
+pub struct GlesPrograms {
     pub corners: Option<GlesTexProgram>,
     pub shadow: Option<GlesPixelProgram>,
     pub titlebar: Option<GlesPixelProgram>,
-    /// The 1 pt inner border of windows in dark.
     pub border: Option<GlesPixelProgram>,
     pub glass: Option<glass::GlassPrograms>,
     pub tone: Option<GlesTexProgram>,
-    /// The funnel deformation of minimizing into the Dock.
     pub genie: Option<GlesTexProgram>,
-    /// The Accessibility display filters (invert, grayscale, contrast).
     pub filter: Option<GlesTexProgram>,
 }
 
+impl GlesPrograms {
+    fn available(&self) -> Shaders {
+        let has = |present: bool, program| present.then_some(program);
+        Shaders {
+            corners: has(self.corners.is_some(), Program::Corners),
+            shadow: has(self.shadow.is_some(), Program::Shadow),
+            titlebar: has(self.titlebar.is_some(), Program::Titlebar),
+            border: has(self.border.is_some(), Program::Border),
+            glass: has(self.glass.is_some(), Program::Glass),
+            tone: has(self.tone.is_some(), Program::Tone),
+            genie: has(self.genie.is_some(), Program::Genie),
+            filter: has(self.filter.is_some(), Program::Filter),
+        }
+    }
+
+    /// The pixel program of `program`, if it is one and compiled.
+    pub fn pixel(&self, program: Program) -> Option<&GlesPixelProgram> {
+        match program {
+            Program::Shadow => self.shadow.as_ref(),
+            Program::Titlebar => self.titlebar.as_ref(),
+            Program::Border => self.border.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The texture program of `program`, if it is one and compiled (the glass has several:
+    /// `glass`).
+    pub fn texture(&self, program: Program) -> Option<&GlesTexProgram> {
+        match program {
+            Program::Corners => self.corners.as_ref(),
+            Program::Tone => self.tone.as_ref(),
+            Program::Genie => self.genie.as_ref(),
+            Program::Filter => self.filter.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// The programs of the renderer drawing `frame`, once compiled.
+pub(crate) fn frame_programs<'a>(frame: &'a GlesFrame<'_, '_>) -> Option<&'a GlesPrograms> {
+    frame.egl_context().user_data().get::<GlesPrograms>()
+}
+
 /// The renderer programs, compiled on the first request and kept in the EGL context.
-pub fn shaders(renderer: &mut GlesRenderer) -> Shaders {
-    if let Some(shaders) = renderer.egl_context().user_data().get::<Shaders>() {
+pub fn gles_programs(renderer: &mut GlesRenderer) -> GlesPrograms {
+    if let Some(shaders) = renderer.egl_context().user_data().get::<GlesPrograms>() {
         return shaders.clone();
     }
     let corners = compile_texture(renderer, "corners", corners::SHADER, &corners::UNIFORMS);
@@ -92,7 +176,7 @@ pub fn shaders(renderer: &mut GlesRenderer) -> Shaders {
         filter::SHADER,
         &filter::UNIFORMS,
     );
-    let shaders = Shaders {
+    let shaders = GlesPrograms {
         corners,
         shadow,
         titlebar,

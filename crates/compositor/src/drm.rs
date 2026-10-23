@@ -10,14 +10,15 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use compositor_render::renderer::{SilicaFrame, SilicaRenderer, SilicaTarget, SilicaTexture};
 use smithay::backend::allocator::Fourcc;
+use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface};
 use smithay::backend::egl::EGLDevice;
 use smithay::backend::input::InputEvent;
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::{
     Bind, BlitFrame, Frame, ImportMem, Offscreen, Renderer, Texture, TextureFilter,
 };
@@ -79,7 +80,7 @@ fn frame_due(tick: Tick) -> bool {
 }
 
 pub struct DrmBackend {
-    pub renderer: GlesRenderer,
+    pub renderer: SilicaRenderer,
     session: LibSeatSession,
     drm: DrmDevice,
     gbm: GbmDevice<DrmDeviceFd>,
@@ -100,7 +101,7 @@ pub struct DrmBackend {
     last_frame: Instant,
     last_dark: bool,
     /// The default cursor, drawn when no client sets one and there is no theme.
-    cursor: Option<GlesTexture>,
+    cursor: Option<SilicaTexture>,
     /// The GPU time of the frames, for `perf.render`, when the driver measures it.
     gpu_timer: Option<crate::egl::GpuTimer>,
     /// The frames of the theme already uploaded, by name, scale (×100) and frame, with their
@@ -108,7 +109,7 @@ pub struct DrmBackend {
     cursors: std::collections::HashMap<
         crate::cursor_theme::FrameKey,
         (
-            GlesTexture,
+            SilicaTexture,
             (i32, i32),
             smithay::backend::renderer::element::Id,
         ),
@@ -141,7 +142,7 @@ struct OutputSurface {
     gbm: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, Option<OutputPresentationFeedback>>,
     damage_tracker: OutputDamageTracker,
     /// What the damage tracker draws into, copied into each scanout buffer (`render_surface`).
-    canvas: Option<GlesTexture>,
+    canvas: Option<SilicaTexture>,
 }
 
 /// A connected connector with the crtc that can drive it and the mode to use.
@@ -249,7 +250,7 @@ fn display_output(choice: &Choice) -> Output {
 /// to keep theirs: on the dev VM's software GPU they do not survive as the swapchain age
 /// promises (silica-os/silica-desktop#233), so each one gets the whole canvas, a plain copy.
 fn render_surface(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     surface: &mut OutputSurface,
     elements: &[crate::render::OutputElement],
     clear_color: [f32; 4],
@@ -264,7 +265,7 @@ fn render_surface(
         .as_ref()
         .is_none_or(|c| c.size() != size || c.format() != Some(format));
     if fresh {
-        let canvas: GlesTexture = renderer
+        let canvas: SilicaTexture = renderer
             .create_buffer(format, size)
             .map_err(|e| format!("canvas: {e}"))?;
         surface.canvas = Some(canvas);
@@ -303,9 +304,12 @@ fn render_surface(
         let mut frame = renderer
             .render(&mut canvas, whole.size, Transform::Normal)
             .map_err(|e| format!("copy frame: {e}"))?;
-        frame
-            .blit_to(&mut target, whole, whole, TextureFilter::Nearest)
-            .map_err(|e| format!("copy: {e}"))?;
+        match (&mut frame, &mut target) {
+            (SilicaFrame::Gles(frame), SilicaTarget::Gles(target)) => frame
+                .blit_to(target, whole, whole, TextureFilter::Nearest)
+                .map_err(|e| format!("copy: {e}"))?,
+            _ => return Err("copy: the canvas needs GLES".to_owned()),
+        }
         frame.finish().map_err(|e| format!("copy finish: {e}"))?
     };
     surface
@@ -318,7 +322,7 @@ fn render_surface(
 fn create_surface(
     drm: &mut DrmDevice,
     gbm: &GbmDevice<DrmDeviceFd>,
-    renderer: &GlesRenderer,
+    renderer: &SilicaRenderer,
     output: &Output,
     choice: &Choice,
 ) -> Result<OutputSurface, String> {
@@ -329,7 +333,7 @@ fn create_surface(
         gbm.clone(),
         GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
     );
-    let formats = renderer.egl_context().dmabuf_render_formats().clone();
+    let formats = Bind::<Dmabuf>::supported_formats(renderer).unwrap_or_default();
     let gbm = GbmBufferedSurface::new(
         surface,
         allocator,
@@ -366,9 +370,11 @@ pub fn init_drm(
         DrmDevice::new(fd.clone(), true).map_err(|e| format!("DRM device: {e}"))?;
     let syncobj_fd = fd.clone();
     let gbm = GbmDevice::new(fd).map_err(|e| format!("GBM device: {e}"))?;
-    let mut renderer = crate::egl::gbm_renderer(gbm.clone())?;
-    let software = EGLDevice::device_for_display(renderer.egl_context().display())
+    let mut gles = crate::egl::gbm_renderer(gbm.clone())?;
+    let software = EGLDevice::device_for_display(gles.egl_context().display())
         .is_ok_and(|device| device.is_software());
+    let gpu_timer = crate::egl::GpuTimer::new(&mut gles);
+    let renderer = SilicaRenderer::from(gles);
     info!(
         "DRM on {} (seat {seat}, software rendering: {software})",
         path.display()
@@ -415,7 +421,6 @@ pub fn init_drm(
         return Err(format!("libinput: cannot assign seat {seat}").into());
     }
     let device_id = drm.device_id();
-    let gpu_timer = crate::egl::GpuTimer::new(&mut renderer);
     let backend = DrmBackend {
         renderer,
         session,
@@ -1180,8 +1185,8 @@ impl State {
             window_veil,
             lock_surfaces,
         };
-        if let Some(timer) = &mut backend.gpu_timer {
-            timer.begin(&mut backend.renderer);
+        if let (Some(timer), Some(gles)) = (&mut backend.gpu_timer, backend.renderer.gles()) {
+            timer.begin(gles);
         }
         let mut elements = crate::render::output_elements(
             &mut backend.renderer,
@@ -1349,9 +1354,9 @@ impl State {
                 Err(err) => warn!("DRM frame on {}: {err}", extra.output.name()),
             }
         }
-        if let Some(timer) = &mut backend.gpu_timer {
-            timer.end(&mut backend.renderer, drawn);
-            timer.collect(&mut backend.renderer, |time| self.perf.gpu_rendered(time));
+        if let (Some(timer), Some(gles)) = (&mut backend.gpu_timer, backend.renderer.gles()) {
+            timer.end(gles, drawn);
+            timer.collect(gles, |time| self.perf.gpu_rendered(time));
         }
         backend.last_frame = now;
         backend.last_dark = dark;

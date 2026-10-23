@@ -8,8 +8,9 @@ use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::texture::{TextureBuffer, TextureRenderElement};
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::utils::{Logical, Point, Size, Transform};
+
+use crate::renderer::{SilicaRenderer, SilicaTexture};
 use tracing::warn;
 
 const INTER_REGULAR: &[u8] = include_bytes!("../fonts/Inter-Regular.ttf");
@@ -228,7 +229,7 @@ impl Canvas {
 /// An element drawn on the canvas, redrawn only when the key changes.
 #[derive(Default)]
 pub struct Sprite {
-    cached: RefCell<Option<(String, TextureBuffer<GlesTexture>)>>,
+    cached: RefCell<Option<(String, TextureBuffer<SilicaTexture>)>>,
 }
 
 impl Sprite {
@@ -237,14 +238,14 @@ impl Sprite {
     #[allow(clippy::too_many_arguments)]
     pub fn element(
         &self,
-        renderer: &mut GlesRenderer,
+        renderer: &mut SilicaRenderer,
         key: &str,
         size: Size<f64, Logical>,
         location: Point<f64, Logical>,
         scale: f64,
         alpha: f32,
         draw: impl FnOnce(&mut Canvas),
-    ) -> Option<TextureRenderElement<GlesTexture>> {
+    ) -> Option<TextureRenderElement<SilicaTexture>> {
         let buffer_scale = scale.round().max(1.0) as i32;
         let full_key = format!("{key}@{buffer_scale}:{}x{}", size.w, size.h);
         let mut cached = self.cached.borrow_mut();

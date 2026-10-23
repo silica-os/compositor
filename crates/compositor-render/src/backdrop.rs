@@ -5,15 +5,15 @@
 
 use std::cell::RefCell;
 
+use smithay::backend::renderer::Frame;
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement};
-use smithay::backend::renderer::gles::{
-    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformType,
-    UniformValue,
-};
+use smithay::backend::renderer::gles::{Uniform, UniformType, UniformValue};
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform};
 
+use crate::Program;
 use crate::glass::render_to_texture;
+use crate::renderer::{SilicaError, SilicaFrame, SilicaRenderer, SilicaTexture};
 
 /// Height of the effect: it disappears at y ≈ 115–120 pt.
 pub const HEIGHT_PT: f64 = 120.0;
@@ -77,7 +77,7 @@ pub struct Backdrop {
 type Cached = (
     Signature,
     Rectangle<i32, Physical>,
-    GlesTexture,
+    SilicaTexture,
     Id,
     CommitCounter,
 );
@@ -85,15 +85,15 @@ type Cached = (
 impl Backdrop {
     /// The backdrop element over `behind` (the desktop wallpaper, from the front),
     /// as wide as the output.
-    pub fn element<E: RenderElement<GlesRenderer>>(
+    pub fn element<E: RenderElement<SilicaRenderer>>(
         &self,
-        renderer: &mut GlesRenderer,
-        program: &GlesTexProgram,
+        renderer: &mut SilicaRenderer,
+        program: Program,
         behind: &[E],
         output: Size<i32, Physical>,
         scale: f64,
         clear_color: [f32; 4],
-    ) -> Result<ToneElement, GlesError> {
+    ) -> Result<ToneElement, SilicaError> {
         let height = ((HEIGHT_PT * scale).ceil() as i32).min(output.h);
         let area = Rectangle::new(Point::from((0, 0)), Size::from((output.w, height)));
         let signature: Signature = behind
@@ -108,27 +108,34 @@ impl Backdrop {
             })
             .collect();
         let mut state = self.state.borrow_mut();
-        let fresh = !matches!(state.as_ref(), Some((s, a, ..)) if *s == signature && *a == area);
-        if fresh {
-            let texture = render_to_texture(renderer, behind, area, scale, clear_color)?;
-            let (id, mut commit) = match state.take() {
-                Some((.., id, commit)) => (id, commit),
-                None => (Id::new(), CommitCounter::default()),
-            };
-            commit.increment();
-            *state = Some((signature, area, texture, id, commit));
-        }
-        let Some((_, area, texture, id, commit)) = state.as_ref() else {
-            return Err(GlesError::FramebufferBindingError);
+        let cached = match state.take() {
+            Some(cached) if cached.0 == signature && cached.1 == area => cached,
+            previous => {
+                let texture = match render_to_texture(renderer, behind, area, scale, clear_color) {
+                    Ok(texture) => texture,
+                    Err(err) => {
+                        *state = previous;
+                        return Err(err);
+                    }
+                };
+                let (id, mut commit) = previous.map_or_else(
+                    || (Id::new(), CommitCounter::default()),
+                    |(.., id, commit)| (id, commit),
+                );
+                commit.increment();
+                (signature, area, texture, id, commit)
+            }
         };
-        Ok(ToneElement {
-            id: id.clone(),
-            commit: *commit,
-            texture: texture.clone(),
-            area: *area,
+        let element = ToneElement {
+            id: cached.3.clone(),
+            commit: cached.4,
+            texture: cached.2.clone(),
+            area: cached.1,
             scale,
-            program: program.clone(),
-        })
+            program,
+        };
+        *state = Some(cached);
+        Ok(element)
     }
 }
 
@@ -136,10 +143,10 @@ impl Backdrop {
 pub struct ToneElement {
     id: Id,
     commit: CommitCounter,
-    texture: GlesTexture,
+    texture: SilicaTexture,
     area: Rectangle<i32, Physical>,
     scale: f64,
-    program: GlesTexProgram,
+    program: Program,
 }
 
 impl Element for ToneElement {
@@ -180,31 +187,41 @@ impl Element for ToneElement {
     }
 }
 
-impl RenderElement<GlesRenderer> for ToneElement {
+impl RenderElement<SilicaRenderer> for ToneElement {
     fn draw(
         &self,
-        frame: &mut GlesFrame<'_, '_>,
+        frame: &mut SilicaFrame<'_, '_>,
         src: Rectangle<f64, Buffer>,
         dst: Rectangle<i32, Physical>,
         damage: &[Rectangle<i32, Physical>],
         opaque_regions: &[Rectangle<i32, Physical>],
-    ) -> Result<(), GlesError> {
+    ) -> Result<(), SilicaError> {
+        let (SilicaFrame::Gles(frame), SilicaTexture::Gles(texture)) = (frame, &self.texture)
+        else {
+            // No CPU program yet: `shaders` reports it missing, so no element is made.
+            return Ok(());
+        };
+        let Some(program) = crate::frame_programs(frame).and_then(|p| p.texture(self.program))
+        else {
+            return Ok(());
+        };
+        let program = program.clone();
         let uniforms = [
             Uniform::new("tone", table_uniform()),
             Uniform::new("tex_height", UniformValue::_1f(self.area.size.h as f32)),
             Uniform::new("scale_px", UniformValue::_1f(self.scale as f32)),
         ];
-        frame.render_texture_from_to(
-            &self.texture,
+        Ok(frame.render_texture_from_to(
+            texture,
             src,
             dst,
             damage,
             opaque_regions,
             Transform::Normal,
             1.0,
-            Some(&self.program),
+            Some(&program),
             &uniforms,
-        )
+        )?)
     }
 }
 
@@ -212,7 +229,7 @@ impl RenderElement<GlesRenderer> for ToneElement {
 #[derive(Debug, Clone)]
 pub struct BlurredElement {
     id: Id,
-    texture: GlesTexture,
+    texture: SilicaTexture,
     src: Rectangle<f64, Buffer>,
     dst: Rectangle<i32, Physical>,
     alpha: f32,
@@ -221,7 +238,7 @@ pub struct BlurredElement {
 impl BlurredElement {
     pub fn new(
         id: Id,
-        texture: GlesTexture,
+        texture: SilicaTexture,
         src: Rectangle<f64, Buffer>,
         dst: Rectangle<i32, Physical>,
         alpha: f32,
@@ -262,15 +279,15 @@ impl Element for BlurredElement {
     }
 }
 
-impl RenderElement<GlesRenderer> for BlurredElement {
+impl RenderElement<SilicaRenderer> for BlurredElement {
     fn draw(
         &self,
-        frame: &mut GlesFrame<'_, '_>,
+        frame: &mut SilicaFrame<'_, '_>,
         src: Rectangle<f64, Buffer>,
         dst: Rectangle<i32, Physical>,
         damage: &[Rectangle<i32, Physical>],
         opaque_regions: &[Rectangle<i32, Physical>],
-    ) -> Result<(), GlesError> {
+    ) -> Result<(), SilicaError> {
         frame.render_texture_from_to(
             &self.texture,
             src,
@@ -279,8 +296,6 @@ impl RenderElement<GlesRenderer> for BlurredElement {
             opaque_regions,
             Transform::Normal,
             self.alpha,
-            None,
-            &[],
         )
     }
 }

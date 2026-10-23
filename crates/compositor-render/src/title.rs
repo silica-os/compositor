@@ -12,8 +12,9 @@ use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::texture::{TextureBuffer, TextureRenderElement};
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::utils::{Logical, Point, Rectangle, Size, Transform};
+
+use crate::renderer::{SilicaRenderer, SilicaTexture};
 use tracing::warn;
 
 const INTER_SEMIBOLD: &[u8] = include_bytes!("../fonts/Inter-SemiBold.ttf");
@@ -142,7 +143,7 @@ pub struct Title {
 
 struct Cached {
     key: (String, [u8; 3], u32, i32),
-    buffer: TextureBuffer<GlesTexture>,
+    buffer: TextureBuffer<SilicaTexture>,
     /// Position of the baseline in the raster, in points.
     ascent: f64,
     /// Width of the raster in pixels.
@@ -154,12 +155,12 @@ impl Title {
     /// empty or there is no room.
     pub fn element(
         &self,
-        renderer: &mut GlesRenderer,
+        renderer: &mut SilicaRenderer,
         text: &str,
         frame: Rectangle<i32, Logical>,
         color: [u8; 3],
         scale: f64,
-    ) -> Option<TextureRenderElement<GlesTexture>> {
+    ) -> Option<TextureRenderElement<SilicaTexture>> {
         let text = text.trim();
         if text.is_empty() {
             return None;

@@ -6,10 +6,10 @@
 
 use std::os::unix::fs::MetadataExt;
 
+use compositor_render::renderer::SilicaRenderer;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::egl::EGLDevice;
 use smithay::backend::renderer::ImportDma;
-use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::delegate_dmabuf;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::wayland::dmabuf::{
@@ -21,7 +21,10 @@ use crate::backend::Backend;
 use crate::state::State;
 
 /// The device (`dev_t`) of the render node the compositor's renderer runs on.
-fn main_device(renderer: &GlesRenderer) -> Result<u64, String> {
+fn main_device(renderer: &SilicaRenderer) -> Result<u64, String> {
+    let renderer = renderer
+        .as_gles()
+        .ok_or("the CPU renderer has no render node")?;
     let device = EGLDevice::device_for_display(renderer.egl_context().display())
         .map_err(|e| format!("EGL device not found: {e}"))?;
     let path = device
@@ -37,7 +40,7 @@ fn main_device(renderer: &GlesRenderer) -> Result<u64, String> {
 pub fn create_global(
     state: &mut DmabufState,
     dh: &DisplayHandle,
-    renderer: &GlesRenderer,
+    renderer: &SilicaRenderer,
 ) -> DmabufGlobal {
     let formats = renderer.dmabuf_formats();
     let feedback = main_device(renderer).and_then(|device| {
@@ -67,9 +70,7 @@ impl DmabufHandler for State {
     ) {
         let imported = match &mut self.backend {
             Backend::Headless(_) => false,
-            backend => backend
-                .gles()
-                .is_some_and(|renderer| renderer.import_dmabuf(&dmabuf, None).is_ok()),
+            backend => backend.renderer().import_dmabuf(&dmabuf, None).is_ok(),
         };
         if imported {
             // If the client is already gone there is nobody to notify.

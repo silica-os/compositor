@@ -8,11 +8,11 @@
 //! 32 pt (9 pt margin) and 26 pt in 52 pt toolbars (19 pt margin). The buttons never move or
 //! shrink with the window width: apps declare a minimum width that keeps them clear.
 
-use smithay::backend::renderer::gles::element::PixelShaderElement;
-use smithay::backend::renderer::gles::{GlesPixelProgram, Uniform, UniformType, UniformValue};
+use smithay::backend::renderer::gles::{Uniform, UniformType, UniformValue};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-use crate::cache::ShaderCache;
+use crate::Program;
+use crate::cache::{ShaderCache, ShaderElement};
 use crate::corners::{CORNER_EXPONENT, CORNER_RADIUS};
 
 /// Height of the compositor's own bar (a plain title bar), in points.
@@ -248,10 +248,10 @@ impl Titlebar {
     /// The bar element for a frame (bar + content, logical, in the output).
     pub fn element(
         &self,
-        program: &GlesPixelProgram,
+        program: Program,
         frame: Rectangle<i32, Logical>,
         state: TitlebarState,
-    ) -> PixelShaderElement {
+    ) -> ShaderElement {
         // With full-size content the band reaches below the buttons, centered lower
         // if the app's bar is taller.
         let height = HEIGHT.max(state.bar_height.ceil() as i32);

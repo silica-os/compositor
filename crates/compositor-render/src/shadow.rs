@@ -2,11 +2,11 @@
 //! "Windows · shadow"): black, Gaussian-blur profile, shifted down, wider for the active
 //! window, with a 1 pt contact ring; in dark about twice as strong.
 
-use smithay::backend::renderer::gles::element::PixelShaderElement;
-use smithay::backend::renderer::gles::{GlesPixelProgram, Uniform, UniformType, UniformValue};
+use smithay::backend::renderer::gles::{Uniform, UniformType, UniformValue};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-use crate::cache::ShaderCache;
+use crate::Program;
+use crate::cache::{ShaderCache, ShaderElement};
 use crate::corners::{CORNER_EXPONENT, CORNER_RADIUS};
 
 /// Parameters of a shadow, in logical points; alpha from 0 to 1.
@@ -79,10 +79,10 @@ impl WindowShadow {
     /// The shadow element for a window with this frame (logical, in the output).
     pub fn element(
         &self,
-        program: &GlesPixelProgram,
+        program: Program,
         window: Rectangle<i32, Logical>,
         style: ShadowStyle,
-    ) -> PixelShaderElement {
+    ) -> ShaderElement {
         let (side, top, bottom) = style.extent;
         let area = Rectangle::new(
             window.loc - Point::from((side, top)),

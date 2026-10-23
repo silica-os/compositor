@@ -1,6 +1,6 @@
 [package]
 name = "compositor-render"
-description = "the compositor's GLES renderer and glass shaders"
+description = "the compositor's renderers (GLES and CPU), effects and glass"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 ab_glyph = "0.2"
+compositor-raster = { path = "../raster" }
 smithay = { version = "0.7", default-features = false, features = ["renderer_gl", "wayland_frontend"] }
 tracing = "0.1"
 

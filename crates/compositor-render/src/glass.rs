@@ -13,12 +13,13 @@ use std::cell::RefCell;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement};
 use smithay::backend::renderer::gles::{
-    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformType,
-    UniformValue,
+    GlesError, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformType, UniformValue,
 };
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{Bind, Frame, Offscreen, Renderer};
 use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform};
+
+use crate::renderer::{SilicaError, SilicaFrame, SilicaRenderer, SilicaTexture};
 
 use crate::glass_profile::{GlassProfile, lens_width, refraction_band};
 
@@ -777,7 +778,7 @@ struct Cached {
     regions: Vec<PhysicalRegion>,
     bbox: Rectangle<i32, Physical>,
     /// One blurred texture per blur present, in the order of the regions.
-    textures: Vec<(BlurKey, GlesTexture)>,
+    textures: Vec<(BlurKey, SilicaTexture)>,
     ids: Vec<Id>,
     commit: CommitCounter,
 }
@@ -799,10 +800,9 @@ impl GlassCache {
     /// frosted level). Error if the renderer cannot draw offscreen: the caller skips the glass
     /// for this frame.
     #[allow(clippy::too_many_arguments)]
-    pub fn elements<E: RenderElement<GlesRenderer>>(
+    pub fn elements<E: RenderElement<SilicaRenderer>>(
         &self,
-        renderer: &mut GlesRenderer,
-        programs: &GlassPrograms,
+        renderer: &mut SilicaRenderer,
         regions: &[PhysicalRegion],
         behind: &[E],
         behind_static: &[E],
@@ -810,7 +810,7 @@ impl GlassCache {
         output: Rectangle<i32, Physical>,
         scale: f64,
         clear_color: [f32; 4],
-    ) -> Result<Vec<GlassElement>, GlesError> {
+    ) -> Result<Vec<GlassElement>, SilicaError> {
         let behind = match quality {
             GlassQuality::Full => behind,
             GlassQuality::Frosted => behind_static,
@@ -875,13 +875,13 @@ impl GlassCache {
         }
         if !reuse {
             let sharp = render_to_texture(renderer, behind, bbox, scale, clear_color)?;
-            let mut textures: Vec<(BlurKey, GlesTexture)> = Vec::new();
+            let mut textures: Vec<(BlurKey, SilicaTexture)> = Vec::new();
             for region in regions {
                 let key = region.blur_key();
                 if textures.iter().any(|(k, _)| *k == key) {
                     continue;
                 }
-                let blurred = blur(renderer, programs, &sharp, bbox.size, key, scale)?;
+                let blurred = blur_with(renderer, &sharp, bbox.size, key, scale)?;
                 textures.push((key, blurred));
             }
             let count = groups(regions).len();
@@ -934,7 +934,6 @@ impl GlassCache {
                     bbox: cached.bbox,
                     area,
                     shapes,
-                    program: programs.material.clone(),
                     fallback: cached.quality == GlassQuality::Opaque,
                 })
             })
@@ -970,13 +969,13 @@ pub(crate) fn buffer_size(size: Size<i32, Physical>) -> Size<i32, Buffer> {
 /// Draws `elements` (from the front to the back) over `clear_color` into a new texture
 /// covering `bbox` of the output: the glass background, the snapshot of a closing
 /// window.
-pub fn render_to_texture<E: RenderElement<GlesRenderer>>(
-    renderer: &mut GlesRenderer,
+pub fn render_to_texture<E: RenderElement<SilicaRenderer>>(
+    renderer: &mut SilicaRenderer,
     elements: &[E],
     bbox: Rectangle<i32, Physical>,
     scale: f64,
     clear_color: [f32; 4],
-) -> Result<GlesTexture, GlesError> {
+) -> Result<SilicaTexture, SilicaError> {
     let mut texture = renderer.create_buffer(Fourcc::Abgr8888, buffer_size(bbox.size))?;
     {
         let mut target = renderer.bind(&mut texture)?;
@@ -1307,6 +1306,32 @@ fn blur_passes(
     Ok(current)
 }
 
+/// `blur` on either renderer.
+fn blur_with(
+    renderer: &mut SilicaRenderer,
+    sharp: &SilicaTexture,
+    size: Size<i32, Physical>,
+    key: BlurKey,
+    scale: f64,
+) -> Result<SilicaTexture, SilicaError> {
+    match (renderer, sharp) {
+        (SilicaRenderer::Gles(renderer), SilicaTexture::Gles(sharp)) => {
+            let Some(programs) = crate::gles_programs(renderer).glass else {
+                return Err(SilicaError::Unsupported(
+                    "the glass programs did not compile",
+                ));
+            };
+            Ok(SilicaTexture::Gles(blur(
+                renderer, &programs, sharp, size, key, scale,
+            )?))
+        }
+        (SilicaRenderer::Cpu(_), SilicaTexture::Cpu(_)) => {
+            Err(SilicaError::Unsupported("glass on the CPU"))
+        }
+        _ => Err(SilicaError::Mismatch),
+    }
+}
+
 /// Blurs the capture with the σ and mixes in the sharp share.
 fn blur(
     renderer: &mut GlesRenderer,
@@ -1347,13 +1372,12 @@ pub struct GlassElement {
     id: Id,
     commit: CommitCounter,
     /// The blurred background, as large as `bbox`.
-    texture: GlesTexture,
+    texture: SilicaTexture,
     bbox: Rectangle<i32, Physical>,
     /// Where it is drawn: the regions of the group plus the merging room.
     area: Rectangle<i32, Physical>,
     /// The regions of the group (same material, at most `MAX_SHAPES`).
     shapes: Vec<PhysicalRegion>,
-    program: GlesTexProgram,
     /// No blur (the opaque quality level): the tint over the profile's fallback surface.
     fallback: bool,
 }
@@ -1384,16 +1408,27 @@ impl Element for GlassElement {
     }
 }
 
-impl RenderElement<GlesRenderer> for GlassElement {
+impl RenderElement<SilicaRenderer> for GlassElement {
     fn draw(
         &self,
-        frame: &mut GlesFrame<'_, '_>,
+        frame: &mut SilicaFrame<'_, '_>,
         src: Rectangle<f64, Buffer>,
         dst: Rectangle<i32, Physical>,
         damage: &[Rectangle<i32, Physical>],
         opaque_regions: &[Rectangle<i32, Physical>],
-    ) -> Result<(), GlesError> {
+    ) -> Result<(), SilicaError> {
         let Some(first) = self.shapes.first() else {
+            return Ok(());
+        };
+        // No CPU program yet: `shaders` reports the glass missing, so no element is made.
+        let (SilicaFrame::Gles(frame), SilicaTexture::Gles(texture)) = (frame, &self.texture)
+        else {
+            return Ok(());
+        };
+        let Some(program) = crate::frame_programs(frame)
+            .and_then(|p| p.glass.as_ref())
+            .map(|glass| glass.material.clone())
+        else {
             return Ok(());
         };
         let m = first.material.matrix;
@@ -1583,17 +1618,17 @@ impl RenderElement<GlesRenderer> for GlassElement {
                 ),
             ),
         ];
-        frame.render_texture_from_to(
-            &self.texture,
+        Ok(frame.render_texture_from_to(
+            texture,
             src,
             dst,
             damage,
             opaque_regions,
             Transform::Normal,
             first.opacity.clamp(0.0, 1.0),
-            Some(&self.program),
+            Some(&program),
             &uniforms,
-        )
+        )?)
     }
 }
 

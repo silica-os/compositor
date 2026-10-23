@@ -4,13 +4,14 @@
 
 use std::time::Duration;
 
+use compositor_render::filter::FilterElement;
+use compositor_render::renderer::{SilicaRenderer, SilicaTexture};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::KeyState;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::texture::TextureRenderElement;
-use smithay::backend::renderer::gles::element::TextureShaderElement;
-use smithay::backend::renderer::gles::{GlesRenderer, Uniform};
+use smithay::backend::renderer::gles::Uniform;
 use smithay::backend::renderer::{Bind, Offscreen, Renderer};
 use smithay::input::keyboard::Keycode;
 use smithay::output::Output;
@@ -141,7 +142,7 @@ pub fn zoom_viewport(
 /// The frame drawn into a texture, then on the output zoomed and filtered. Without a filter,
 /// the elements are returned as they are; on an error too (the frame stays readable).
 pub fn post_process(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     output: &Output,
     elements: Vec<OutputElement>,
     pointer: Option<Point<f64, Logical>>,
@@ -161,12 +162,8 @@ pub fn post_process(
     let buffer_size = size.to_logical(1).to_buffer(1, Transform::Normal);
     let rendered = (|| -> Result<_, String> {
         let mut texture =
-            Offscreen::<smithay::backend::renderer::gles::GlesTexture>::create_buffer(
-                renderer,
-                Fourcc::Abgr8888,
-                buffer_size,
-            )
-            .map_err(|e| format!("buffer: {e:?}"))?;
+            Offscreen::<SilicaTexture>::create_buffer(renderer, Fourcc::Abgr8888, buffer_size)
+                .map_err(|e| format!("buffer: {e:?}"))?;
         {
             let mut framebuffer = renderer
                 .bind(&mut texture)
@@ -209,7 +206,7 @@ pub fn post_process(
         Kind::Unspecified,
     );
     let contrast = if config.increase_contrast { 1.35 } else { 1.0 };
-    let element = TextureShaderElement::new(
+    let element = FilterElement::new(
         inner,
         program,
         vec![

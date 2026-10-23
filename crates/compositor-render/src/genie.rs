@@ -11,14 +11,13 @@
 use smithay::backend::renderer::Frame;
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement};
-use smithay::backend::renderer::gles::{
-    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformType,
-    UniformValue,
-};
+use smithay::backend::renderer::gles::{Uniform, UniformType, UniformValue};
 use smithay::backend::renderer::utils::{CommitCounter, OpaqueRegions};
 use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform};
 
+use crate::Program;
 use crate::animation::GenieShape;
+use crate::renderer::{SilicaError, SilicaFrame, SilicaRenderer, SilicaTexture};
 
 pub const SHADER: &str = include_str!("shaders/genie.frag");
 pub const UNIFORMS: [(&str, UniformType); 6] = [
@@ -35,7 +34,7 @@ pub const UNIFORMS: [(&str, UniformType); 6] = [
 pub struct GenieElement {
     id: Id,
     commit: CommitCounter,
-    inner: TextureRenderElement<GlesTexture>,
+    inner: TextureRenderElement<SilicaTexture>,
     /// The effect area in the output: frame and thumbnail together.
     area: Rectangle<i32, Physical>,
     window: Rectangle<f64, Physical>,
@@ -43,15 +42,15 @@ pub struct GenieElement {
     frame_uv: [f32; 4],
     shape: GenieShape,
     output: Size<i32, Physical>,
-    program: Option<GlesTexProgram>,
+    program: Option<Program>,
 }
 
 /// The data of a genie for [`GenieElement::new`].
 pub struct GenieParts {
     pub id: Id,
     pub commit: CommitCounter,
-    pub context_id: smithay::backend::renderer::ContextId<GlesTexture>,
-    pub texture: GlesTexture,
+    pub context_id: smithay::backend::renderer::ContextId<SilicaTexture>,
+    pub texture: SilicaTexture,
     /// Where the snapshot is in the output, in physical pixels.
     pub snapshot: Rectangle<i32, Physical>,
     /// The window frame (without shadow) in the output.
@@ -60,7 +59,7 @@ pub struct GenieParts {
     pub target: Rectangle<f64, Physical>,
     pub shape: GenieShape,
     pub output: Size<i32, Physical>,
-    pub program: Option<GlesTexProgram>,
+    pub program: Option<Program>,
 }
 
 impl GenieElement {
@@ -185,24 +184,29 @@ impl Element for GenieElement {
     }
 }
 
-impl RenderElement<GlesRenderer> for GenieElement {
+impl RenderElement<SilicaRenderer> for GenieElement {
     fn draw(
         &self,
-        frame: &mut GlesFrame<'_, '_>,
+        frame: &mut SilicaFrame<'_, '_>,
         src: Rectangle<f64, Buffer>,
         dst: Rectangle<i32, Physical>,
         damage: &[Rectangle<i32, Physical>],
         opaque_regions: &[Rectangle<i32, Physical>],
-    ) -> Result<(), GlesError> {
-        // Without the shader no genie: the window disappears right away (never a stretched texture).
-        let Some(program) = &self.program else {
+    ) -> Result<(), SilicaError> {
+        // Without the program no genie: the window disappears right away (never a stretched
+        // texture).
+        let (Some(program), SilicaFrame::Gles(gles)) = (self.program, &mut *frame) else {
             return Ok(());
         };
+        let Some(texture) = crate::frame_programs(gles).and_then(|p| p.texture(program)) else {
+            return Ok(());
+        };
+        let texture = texture.clone();
         // The frame may draw the area shifted (offscreen): the transform follows `dst`.
         let shift = self.area.loc - dst.loc;
-        let uniforms = self.uniforms(frame.transformation(), shift);
-        frame.override_default_tex_program(program.clone(), uniforms);
-        let result = RenderElement::<GlesRenderer>::draw(
+        let uniforms = self.uniforms(gles.transformation(), shift);
+        gles.override_default_tex_program(texture, uniforms);
+        let result = RenderElement::<SilicaRenderer>::draw(
             &self.inner,
             frame,
             src,
@@ -210,7 +214,9 @@ impl RenderElement<GlesRenderer> for GenieElement {
             damage,
             opaque_regions,
         );
-        frame.clear_tex_program_override();
+        if let SilicaFrame::Gles(gles) = frame {
+            gles.clear_tex_program_override();
+        }
         result
     }
 }

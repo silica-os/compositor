@@ -3,9 +3,7 @@
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::RenderElement;
-use smithay::backend::renderer::{ExportMem, ImportAll, Offscreen, Renderer, Texture};
-use smithay::desktop::space::space_render_elements;
-use smithay::desktop::{Space, Window};
+use smithay::backend::renderer::{ExportMem, Offscreen, Renderer};
 use smithay::output::Output;
 use smithay::utils::{Rectangle, Transform};
 
@@ -158,22 +156,6 @@ pub fn draw_over(
             }
         }
     }
-}
-
-/// Draws the space into an offscreen buffer and reads it back (renderer without effects).
-pub fn capture<R, T>(
-    renderer: &mut R,
-    output: &Output,
-    space: &Space<Window>,
-    clear_color: [f32; 4],
-) -> Result<Capture, String>
-where
-    R: Renderer + ImportAll + Offscreen<T> + ExportMem,
-    R::TextureId: Clone + Texture + 'static,
-{
-    let elements = space_render_elements::<_, Window, _>(renderer, [space], output, 1.0)
-        .map_err(|e| format!("{e:?}"))?;
-    capture_elements(renderer, output, &elements, clear_color)
 }
 
 /// Draws the given elements into an offscreen buffer and reads it back.

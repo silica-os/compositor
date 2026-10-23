@@ -3,13 +3,13 @@
 //! The arrow is only the fallback when the XCursor theme (Adwaita by default, see
 //! `cursor_theme.rs`) is missing.
 
+use compositor_render::renderer::{SilicaRenderer, SilicaTexture};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::Id;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::{ImportMem, Renderer, Texture};
 use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
 use smithay::utils::{Logical, Point, Transform};
@@ -62,7 +62,7 @@ pub fn arrow() -> (i32, i32, Vec<u8>) {
 }
 
 /// The default cursor as a texture, generated in code ([`arrow`]).
-pub fn default_texture(renderer: &mut GlesRenderer) -> Option<GlesTexture> {
+pub fn default_texture(renderer: &mut SilicaRenderer) -> Option<SilicaTexture> {
     let (w, h, pixels) = arrow();
     match renderer.import_memory(&pixels, Fourcc::Abgr8888, (w, h).into(), false) {
         Ok(texture) => Some(texture),
@@ -78,9 +78,9 @@ pub fn default_texture(renderer: &mut GlesRenderer) -> Option<GlesTexture> {
 /// physical pixels and, for a theme frame, the element id of that frame (the built-in arrow
 /// has none).
 pub fn elements(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     status: &CursorImageStatus,
-    named: Option<(&GlesTexture, (i32, i32), Option<Id>)>,
+    named: Option<(&SilicaTexture, (i32, i32), Option<Id>)>,
     location: Point<f64, Logical>,
     scale: f64,
 ) -> Vec<OutputElement> {

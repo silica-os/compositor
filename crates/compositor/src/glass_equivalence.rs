@@ -18,12 +18,12 @@
 )]
 
 use compositor_render::glass::{
-    GlassCache, GlassElement, GlassPrograms, GlassQuality, PhysicalRegion, effective_factor,
+    GlassCache, GlassElement, GlassQuality, PhysicalRegion, effective_factor,
 };
 use compositor_render::glass_profile::{BlurScale, GlassKind, GlassProfile};
+use compositor_render::renderer::{SilicaError, SilicaFrame, SilicaRenderer, SilicaTexture};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement};
-use smithay::backend::renderer::gles::{GlesError, GlesFrame, GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::{CommitCounter, DamageSet};
 use smithay::backend::renderer::{Bind, ExportMem, Frame, ImportMem, Offscreen, Renderer};
 use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform};
@@ -215,14 +215,14 @@ struct Layer {
     commit: CommitCounter,
     /// The commit before `commit` and what it damaged (relative to the element).
     previous: Option<(CommitCounter, Vec<Rectangle<i32, Physical>>)>,
-    texture: GlesTexture,
+    texture: SilicaTexture,
     image: Image,
     geometry: Rectangle<i32, Physical>,
     alpha: f32,
 }
 
 impl Layer {
-    fn new(renderer: &mut GlesRenderer, image: Image, at: Point<i32, Physical>) -> Self {
+    fn new(renderer: &mut SilicaRenderer, image: Image, at: Point<i32, Physical>) -> Self {
         let texture = import(renderer, &image);
         Self {
             id: Id::new(),
@@ -238,7 +238,7 @@ impl Layer {
     /// New content, damaging `damage` (relative to the element).
     fn update(
         &mut self,
-        renderer: &mut GlesRenderer,
+        renderer: &mut SilicaRenderer,
         image: Image,
         damage: Vec<Rectangle<i32, Physical>>,
     ) {
@@ -251,7 +251,7 @@ impl Layer {
     }
 }
 
-fn import(renderer: &mut GlesRenderer, image: &Image) -> GlesTexture {
+fn import(renderer: &mut SilicaRenderer, image: &Image) -> SilicaTexture {
     renderer
         .import_memory(
             &image.rgba,
@@ -305,15 +305,15 @@ impl Element for Layer {
     }
 }
 
-impl RenderElement<GlesRenderer> for Layer {
+impl RenderElement<SilicaRenderer> for Layer {
     fn draw(
         &self,
-        frame: &mut GlesFrame<'_, '_>,
+        frame: &mut SilicaFrame<'_, '_>,
         src: Rectangle<f64, Buffer>,
         dst: Rectangle<i32, Physical>,
         damage: &[Rectangle<i32, Physical>],
         opaque_regions: &[Rectangle<i32, Physical>],
-    ) -> Result<(), GlesError> {
+    ) -> Result<(), SilicaError> {
         frame.render_texture_from_to(
             &self.texture,
             src,
@@ -322,8 +322,6 @@ impl RenderElement<GlesRenderer> for Layer {
             opaque_regions,
             Transform::Normal,
             self.alpha,
-            None,
-            &[],
         )
     }
 }
@@ -332,23 +330,20 @@ impl RenderElement<GlesRenderer> for Layer {
 // Drawing and reading back
 
 struct Gpu {
-    renderer: GlesRenderer,
-    glass: GlassPrograms,
+    renderer: SilicaRenderer,
     /// The backdrops made so far, by scale (bits).
     backdrops: Vec<(u64, Vec<(String, Image)>)>,
 }
 
 fn gpu() -> Gpu {
-    let mut renderer = crate::egl::headless_renderer(false).expect("headless GLES renderer");
-    let shaders = compositor_render::shaders(&mut renderer);
+    let renderer = crate::egl::headless_renderer(false).expect("headless GLES renderer");
     Gpu {
-        glass: shaders.glass.expect("glass shaders"),
-        renderer,
+        renderer: renderer.into(),
         backdrops: Vec::new(),
     }
 }
 
-fn draw_one<E: RenderElement<GlesRenderer>>(frame: &mut GlesFrame<'_, '_>, element: &E) {
+fn draw_one<E: RenderElement<SilicaRenderer>>(frame: &mut SilicaFrame<'_, '_>, element: &E) {
     let geometry = element.geometry(Scale::from(1.0));
     element
         .draw(
@@ -363,14 +358,14 @@ fn draw_one<E: RenderElement<GlesRenderer>>(frame: &mut GlesFrame<'_, '_>, eleme
 
 /// The layers (from the front) and the glass over them, drawn into `size` and read back.
 fn compose(
-    renderer: &mut GlesRenderer,
+    renderer: &mut SilicaRenderer,
     size: Size<i32, Physical>,
     clear: [f32; 4],
     layers: &[Layer],
     glass: &[GlassElement],
 ) -> Image {
     let buffer = Size::<i32, Buffer>::from((size.w, size.h));
-    let mut texture: GlesTexture = renderer.create_buffer(Fourcc::Abgr8888, buffer).unwrap();
+    let mut texture: SilicaTexture = renderer.create_buffer(Fourcc::Abgr8888, buffer).unwrap();
     let mut target = renderer.bind(&mut texture).unwrap();
     {
         let mut frame = renderer
@@ -412,7 +407,6 @@ fn frame(
     let glass = cache
         .elements(
             &mut gpu.renderer,
-            &gpu.glass,
             regions,
             layers,
             layers,
@@ -718,7 +712,6 @@ fn refracted(
     let glass = GlassCache::default()
         .elements(
             &mut gpu.renderer,
-            &gpu.glass,
             &[region],
             &layers,
             &layers,
@@ -1059,11 +1052,9 @@ fn inspect_one_case() {
 #[test]
 #[ignore = "a benchmark, run by hand"]
 fn glass_cost() {
-    let mut renderer = crate::egl::headless_renderer(true).expect("headless GLES renderer");
-    let shaders = compositor_render::shaders(&mut renderer);
+    let renderer = crate::egl::headless_renderer(true).expect("headless GLES renderer");
     let mut gpu = Gpu {
-        glass: shaders.glass.expect("glass shaders"),
-        renderer,
+        renderer: renderer.into(),
         backdrops: Vec::new(),
     };
     for scale in [1.0, 2.0] {

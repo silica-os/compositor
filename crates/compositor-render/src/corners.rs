@@ -5,11 +5,12 @@ use smithay::backend::renderer::Frame;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{CropRenderElement, RescaleRenderElement};
 use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};
-use smithay::backend::renderer::gles::{
-    GlesError, GlesFrame, GlesRenderer, GlesTexProgram, Uniform, UniformValue,
-};
+use smithay::backend::renderer::gles::{Uniform, UniformValue};
 use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
 use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform};
+
+use crate::Program;
+use crate::renderer::{SilicaError, SilicaFrame, SilicaRenderer};
 
 /// Superellipse |x/r|ⁿ + |y/r|ⁿ = 1 that stands for the Amalfi window corner: radius 18 with
 /// smoothing 0.6 (the kit's smooth corner, `tokens.json` `radii.window`). Fitted to the
@@ -64,7 +65,7 @@ pub(crate) fn frag_to_local(
 
 /// A window surface (main or subsurface), scaled around a point during the
 /// animations (scale 1 at rest).
-pub type WindowSurface = RescaleRenderElement<WaylandSurfaceRenderElement<GlesRenderer>>;
+pub type WindowSurface = RescaleRenderElement<WaylandSurfaceRenderElement<SilicaRenderer>>;
 
 /// A window surface with the corners cut. Without a program (shader not
 /// compiled) it is drawn as it is.
@@ -76,7 +77,7 @@ pub struct RoundedSurface {
     scale: f64,
     /// Output size in physical pixels, before the frame transform.
     output: Size<i32, Physical>,
-    program: Option<GlesTexProgram>,
+    program: Option<Program>,
     /// The cell this surface is clipped to ([`RoundedSurface::cropped`]), in the same
     /// space as the element geometry.
     crop: Option<(Rectangle<i32, Physical>, f64)>,
@@ -88,7 +89,7 @@ impl RoundedSurface {
         window: Rectangle<f64, Physical>,
         scale: f64,
         output: Size<i32, Physical>,
-        program: Option<GlesTexProgram>,
+        program: Option<Program>,
     ) -> Self {
         let radius = radius_for(window.size, scale);
         Self {
@@ -223,27 +224,33 @@ impl Element for RoundedSurface {
     }
 }
 
-impl RenderElement<GlesRenderer> for RoundedSurface {
+impl RenderElement<SilicaRenderer> for RoundedSurface {
     fn draw(
         &self,
-        frame: &mut GlesFrame<'_, '_>,
+        frame: &mut SilicaFrame<'_, '_>,
         src: Rectangle<f64, Buffer>,
         dst: Rectangle<i32, Physical>,
         damage: &[Rectangle<i32, Physical>],
         opaque_regions: &[Rectangle<i32, Physical>],
-    ) -> Result<(), GlesError> {
-        let Some(program) = &self.program else {
-            return self.inner.draw(frame, src, dst, damage, opaque_regions);
-        };
+    ) -> Result<(), SilicaError> {
         let shift = self.drawn_origin() - dst.loc;
-        let uniforms = self.uniforms(frame.transformation(), shift);
-        frame.override_default_tex_program(program.clone(), uniforms);
+        let mut overridden = false;
+        if let (Some(program), SilicaFrame::Gles(gles)) = (self.program, &mut *frame)
+            && let Some(texture) = crate::frame_programs(gles).and_then(|p| p.texture(program))
+        {
+            let texture = texture.clone();
+            let uniforms = self.uniforms(gles.transformation(), shift);
+            gles.override_default_tex_program(texture, uniforms);
+            overridden = true;
+        }
         let result = self.inner.draw(frame, src, dst, damage, opaque_regions);
-        frame.clear_tex_program_override();
+        if overridden && let SilicaFrame::Gles(gles) = frame {
+            gles.clear_tex_program_override();
+        }
         result
     }
 
-    fn underlying_storage(&self, renderer: &mut GlesRenderer) -> Option<UnderlyingStorage<'_>> {
+    fn underlying_storage(&self, renderer: &mut SilicaRenderer) -> Option<UnderlyingStorage<'_>> {
         // With the corners cut the buffer cannot be shown as it is (DRM planes).
         if self.program.is_some() {
             return None;
