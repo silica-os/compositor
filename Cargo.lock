@@ -1297,8 +1297,12 @@ name = "silica-test-client"
 version = "0.1.0"
 dependencies = [
  "rustix 1.1.5",
+ "serde_json",
+ "silica-control",
+ "silica-protocols",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]

@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! silica-test-client [--color RRGGBB] [--size WxH] [--damage WxH] [--seconds N]
+//! silica-test-client --scene [--seconds N]
 //! silica-test-client --jit
 //! ```
 //!
@@ -10,8 +11,14 @@
 //! exits after `--seconds` (default: until the window is closed). Each frame damages the whole
 //! window, or only a centered `--damage` rectangle, as a spinner would.
 //!
+//! `--scene` maps the desktop that the CPU frame budget is measured on and drags a window
+//! across it for `--seconds` (default 10), then prints what `perf.render` measured
+//! (`scene.rs`).
+//!
 //! `--jit` maps no window: it runs code from anonymous memory, as a JIT does, and exits 0 if
 //! the kernel allowed it.
+
+mod scene;
 
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -31,6 +38,7 @@ use wayland_protocols::xdg::shell::client::xdg_toplevel::{self, XdgToplevel};
 use wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
 
 struct Options {
+    scene: bool,
     color: u32,
     size: (i32, i32),
     damage: Option<(i32, i32)>,
@@ -70,7 +78,12 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(&options) {
+    let result = if options.scene {
+        scene::run(options.seconds.unwrap_or(10))
+    } else {
+        run(&options)
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("silica-test-client: {err}");
@@ -124,6 +137,7 @@ fn jit() -> Result<(), String> {
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut options = Options {
+        scene: false,
         color: 0xffd0_3030,
         size: (480, 320),
         damage: None,
@@ -132,6 +146,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
+            "--scene" => options.scene = true,
             "--color" => {
                 let text = value()?;
                 let rgb = u32::from_str_radix(&text, 16)
