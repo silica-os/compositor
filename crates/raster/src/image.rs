@@ -1,6 +1,8 @@
 //! Pixels in memory: premultiplied BGRA8, one `u32` per pixel (`0xAARRGGBB`, which is DRM's
 //! `Argb8888` in little-endian memory), rows packed with no padding.
 
+use std::ops::Range;
+
 use smithay::backend::allocator::Fourcc;
 use smithay::utils::Rectangle;
 
@@ -146,12 +148,37 @@ fn swap_red_blue(p: u32) -> u32 {
     (p & 0xff00_ff00) | ((p >> 16) & 0xff) | ((p & 0xff) << 16)
 }
 
+/// Pixels per run of an image's coverage.
+const RUN: usize = 16;
+
+/// What drawing a run of pixels over something takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cover {
+    /// All transparent: nothing.
+    Clear,
+    /// All opaque: at full alpha, a copy.
+    Opaque,
+    /// A blend.
+    Mixed,
+}
+
+/// Which runs of `RUN` pixels of every row are all transparent and which all opaque, as
+/// `words` bits per row in each mask.
+#[derive(Debug, Clone)]
+struct Coverage {
+    words: usize,
+    clear: Vec<u64>,
+    opaque: Vec<u64>,
+}
+
 /// An image of premultiplied BGRA8 pixels.
 #[derive(Debug, Clone, Default)]
 pub struct Image {
     width: usize,
     height: usize,
     pixels: Vec<u32>,
+    /// Set by `analyze`, dropped by any change to the pixels.
+    coverage: Option<Coverage>,
 }
 
 impl Image {
@@ -161,7 +188,82 @@ impl Image {
             width,
             height,
             pixels: vec![0; width.saturating_mul(height)],
+            coverage: None,
         }
+    }
+
+    /// Notes which runs of pixels are all transparent or all opaque, until the pixels change:
+    /// for an image drawn many times, such as an effect painted once.
+    pub fn analyze(&mut self) {
+        let words = self.width.div_ceil(RUN).div_ceil(64);
+        let mut clear = vec![0; words.saturating_mul(self.height)];
+        let mut opaque = vec![0; words.saturating_mul(self.height)];
+        let rows = self.pixels.chunks_exact(self.width.max(1));
+        let masks = clear
+            .chunks_exact_mut(words.max(1))
+            .zip(opaque.chunks_exact_mut(words.max(1)));
+        for (row, (clear, opaque)) in rows.zip(masks) {
+            for (i, run) in row.chunks(RUN).enumerate() {
+                let (word, bit) = (i / 64, 1 << (i % 64));
+                let any = run.iter().fold(0, |any, p| any | p);
+                let all = run.iter().fold(u32::MAX, |all, p| all & p);
+                if any == 0
+                    && let Some(w) = clear.get_mut(word)
+                {
+                    *w |= bit;
+                }
+                if all >> 24 == 0xff
+                    && let Some(w) = opaque.get_mut(word)
+                {
+                    *w |= bit;
+                }
+            }
+        }
+        self.coverage = Some(Coverage {
+            words,
+            clear,
+            opaque,
+        });
+    }
+
+    /// Pixels `x0..x1` of row `y` split by `analyze` into what drawing them over takes:
+    /// `f(range, cover)` in order, the ranges counted from `x0`. All `Mixed` if not analyzed.
+    pub fn covers(&self, y: i32, x0: i32, x1: i32, mut f: impl FnMut(Range<usize>, Cover)) {
+        let (Some(y), Some(x0), Some(x1)) = (index(y), index(x0), index(x1)) else {
+            return;
+        };
+        if x0 >= x1 {
+            return;
+        }
+        let Some(coverage) = &self.coverage else {
+            f(0..x1 - x0, Cover::Mixed);
+            return;
+        };
+        let row = y.saturating_mul(coverage.words);
+        let bit = |mask: &[u64], run: usize| {
+            mask.get(row + run / 64)
+                .is_some_and(|w| (w >> (run % 64)) & 1 == 1)
+        };
+        let cover = |run: usize| {
+            if bit(&coverage.clear, run) {
+                Cover::Clear
+            } else if bit(&coverage.opaque, run) {
+                Cover::Opaque
+            } else {
+                Cover::Mixed
+            }
+        };
+        let (mut start, mut current) = (x0, cover(x0 / RUN));
+        let mut x = (x0 / RUN + 1) * RUN;
+        while x < x1 {
+            let next = cover(x / RUN);
+            if next != current {
+                f(start - x0..x - x0, current);
+                (start, current) = (x, next);
+            }
+            x += RUN;
+        }
+        f(start - x0..x1 - x0, current);
     }
 
     pub fn width(&self) -> usize {
@@ -181,6 +283,7 @@ impl Image {
     }
 
     pub fn pixels_mut(&mut self) -> &mut [u32] {
+        self.coverage = None;
         &mut self.pixels
     }
 
@@ -190,6 +293,7 @@ impl Image {
     }
 
     pub fn row_mut(&mut self, y: usize) -> Option<&mut [u32]> {
+        self.coverage = None;
         let start = y.checked_mul(self.width)?;
         self.pixels.get_mut(start..start.checked_add(self.width)?)
     }
@@ -201,6 +305,7 @@ impl Image {
     }
 
     pub fn span_mut(&mut self, y: i32, x0: i32, x1: i32) -> Option<&mut [u32]> {
+        self.coverage = None;
         let (y, x0, x1) = (index(y)?, index(x0)?, index(x1)?);
         self.row_mut(y)?.get_mut(x0..x1)
     }

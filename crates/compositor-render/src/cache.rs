@@ -95,6 +95,8 @@ impl ShaderElement {
             ],
             &mut texture.write(),
         );
+        // Drawn every frame from now on: most of a shadow or a border is transparent.
+        texture.write().analyze();
         *painted = Some(Painted {
             commit: self.commit,
             src,

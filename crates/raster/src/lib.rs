@@ -1371,6 +1371,62 @@ mod tests {
     }
 
     #[test]
+    fn an_analyzed_texture_draws_as_before() {
+        let mut renderer = CpuRenderer::with_threads(1);
+        // Runs of 16 transparent, opaque and translucent pixels, the last one cut short.
+        let pixels: Vec<u32> = (0..70 * 3)
+            .map(|i: u32| match (i % 70 / 16 + i / 70) % 3 {
+                0 => 0,
+                1 => 0xff00_0000 | i.wrapping_mul(2_654_435_761) >> 8,
+                _ => 0x8040_2010 | (i & 0x0f),
+            })
+            .collect();
+        let plain = texture(&mut renderer, 70, 3, &pixels);
+        let analyzed = texture(&mut renderer, 70, 3, &pixels);
+        analyzed.write().analyze();
+        for alpha in [1.0, 0.5] {
+            let draws = [&plain, &analyzed].map(|tex| {
+                draw(&mut renderer, (80, 3), Transform::Normal, |frame| {
+                    frame.clear(RED, &[rect(0, 0, 80, 3)]).unwrap();
+                    frame
+                        .render_texture_at(
+                            tex,
+                            (3, 0).into(),
+                            1,
+                            1.0,
+                            Transform::Normal,
+                            &[rect(5, 0, 60, 3)],
+                            &[],
+                            alpha,
+                        )
+                        .unwrap();
+                })
+            });
+            assert_eq!(draws[0], draws[1], "alpha {alpha}");
+        }
+        let covers = |tex: &CpuTexture| {
+            let mut covers = Vec::new();
+            tex.read()
+                .covers(0, 0, 70, |run, cover| covers.push((run, cover)));
+            covers
+        };
+        use crate::image::Cover::{Clear, Mixed, Opaque};
+        assert_eq!(
+            covers(&analyzed),
+            [
+                (0..16, Clear),
+                (16..32, Opaque),
+                (32..48, Mixed),
+                (48..64, Clear),
+                (64..70, Opaque)
+            ]
+        );
+        // Drawing into it forgets what it knew.
+        analyzed.write().pixels_mut().fill(0);
+        assert_eq!(covers(&analyzed), [(0..70, Mixed)]);
+    }
+
+    #[test]
     fn rotated_outputs_map_like_smithay() {
         let mut renderer = CpuRenderer::with_threads(1);
         let tex = texture(&mut renderer, 2, 2, &[1 << 24, 2 << 24, 3 << 24, 4 << 24]);

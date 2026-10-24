@@ -713,6 +713,12 @@ impl TestWindow {
             &qh,
             (),
         );
+        // An opaque window says so, as a well-behaved client does.
+        if pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255) {
+            let region = compositor.create_region(&qh, ());
+            region.add(0, 0, w as i32, h as i32);
+            surface.set_opaque_region(Some(&region));
+        }
         surface.attach(Some(&buffer), 0, 0);
         surface.damage_buffer(0, 0, w as i32, h as i32);
         surface.commit();
@@ -831,6 +837,12 @@ impl TestWindow {
             let region = compositor.create_region(&qh, ());
             region.add(ix, iy, iw, ih);
             surface.set_input_region(Some(&region));
+        }
+        // An opaque layer says so, as a wallpaper does: what is under it is not drawn.
+        if pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255) {
+            let region = compositor.create_region(&qh, ());
+            region.add(0, 0, w as i32, h as i32);
+            surface.set_opaque_region(Some(&region));
         }
         surface.attach(Some(&buffer), 0, 0);
         surface.damage_buffer(0, 0, w as i32, h as i32);

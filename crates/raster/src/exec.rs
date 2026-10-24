@@ -10,7 +10,7 @@ use rayon::ThreadPool;
 use smithay::backend::renderer::TextureFilter;
 
 use crate::CpuTexture;
-use crate::image::{Image, Rect, dim, index};
+use crate::image::{Cover, Image, Rect, dim, index};
 use crate::kernels::{Kernels, Walk, fixed, sample_nearest};
 
 /// Rows per band: 16 rows of a 1280-wide target are 80 KiB, which stay in L2 while every
@@ -241,10 +241,32 @@ impl DisplayList {
                         };
                         match *map {
                             Map::Offset { dx, dy } => match shader {
-                                None => each_row(band, rect, |dst, y| {
+                                None if *copy => each_row(band, rect, |dst, y| {
                                     if let Some(s) = src.span(y + dy, rect.x0 + dx, rect.x1 + dx) {
                                         blend(dst, s);
                                     }
+                                }),
+                                // Over, skipping what is transparent and copying what is
+                                // opaque, where the source knows.
+                                None => each_row(band, rect, |dst, y| {
+                                    let (y, x0, x1) = (y + dy, rect.x0 + dx, rect.x1 + dx);
+                                    let Some(s) = src.span(y, x0, x1) else {
+                                        return;
+                                    };
+                                    src.covers(y, x0, x1, |run, cover| {
+                                        let (Some(d), Some(s)) =
+                                            (dst.get_mut(run.clone()), s.get(run))
+                                        else {
+                                            return;
+                                        };
+                                        match cover {
+                                            Cover::Clear => {}
+                                            Cover::Opaque if *alpha >= 255 => {
+                                                kernels.copy(d, s, 255)
+                                            }
+                                            _ => kernels.over(d, s, *alpha),
+                                        }
+                                    });
                                 }),
                                 Some(shader) => SCRATCH.with_borrow_mut(|scratch| {
                                     each_row(band, rect, |dst, y| {
