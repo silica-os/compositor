@@ -776,8 +776,9 @@ impl State {
         self.dock_refresh();
     }
 
-    /// The Dock asked to activate a window: shown first if the Dock hid it.
-    fn dock_activate(&mut self, window: &Window) {
+    /// A window the Dock hid (on another space) is activated: it comes back on screen, and the
+    /// Dock, told of its focus, brings its space.
+    pub fn dock_unhide(&mut self, window: &Window) {
         self.dock_show_window(window);
         if let Some(bound) = self.dock.bound.as_mut()
             && let Some(node) = bound
@@ -788,6 +789,11 @@ impl State {
         {
             node.applied.visibility = Visibility::Inherit;
         }
+    }
+
+    /// The Dock asked to activate a window: shown first if the Dock hid it.
+    fn dock_activate(&mut self, window: &Window) {
+        self.dock_unhide(window);
         if let Some(identifier) = crate::shell::toplevel_handle(window).map(|h| h.identifier()) {
             self.activate_identifier(&identifier, false);
         }

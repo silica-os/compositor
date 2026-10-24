@@ -358,6 +358,16 @@ impl State {
                 if let Some(window) = hidden {
                     self.unhide_for(&window);
                 }
+                // A window on another space: it shows, and the Dock brings its space.
+                let away = target.id.and_then(|id| {
+                    self.dock_hidden
+                        .windows()
+                        .find(|w| Self::window_id(w) == Some(id))
+                        .cloned()
+                });
+                if let Some(window) = away {
+                    self.dock_unhide(&window);
+                }
                 let window = match target.id.and_then(|id| self.minimized_window(id)) {
                     Some(window) => {
                         self.restore_window(&window);

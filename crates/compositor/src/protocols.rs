@@ -342,6 +342,7 @@ impl State {
         let Some(window) = self.window_for(surface) else {
             return;
         };
+        self.dock_unhide(&window);
         self.space.raise_element(&window, true);
         self.focus_window(Some(window));
     }

@@ -760,3 +760,41 @@ fn the_dock_hides_the_menu_bar() {
     let shot = screenshot(&compositor);
     assert!(blue(&shot) && blue_at(&shot, 116), "at both placements");
 }
+
+#[test]
+fn a_window_on_a_hidden_space_that_takes_the_focus_tells_the_dock() {
+    use silica_control::commands::WINDOW_FOCUS;
+    // Another space's window (hidden by the Dock) activated from outside: the Dock hears the
+    // focus and brings its space.
+    let compositor = Headless::start("dock-activate-hidden");
+    let _first = TestWindow::open_sized(&compositor.wayland, "first", (120, 80));
+    let _second = TestWindow::open_sized(&compositor.wayland, "second", (120, 80));
+    let ids: Vec<(u64, bool)> = windows(&compositor)
+        .iter()
+        .map(|w| (w.id, w.focused))
+        .collect();
+    let (Some(&(second, _)), Some(&(first, _))) =
+        (ids.iter().find(|w| w.1), ids.iter().find(|w| !w.1))
+    else {
+        panic!("two windows, one focused: {ids:?}");
+    };
+    let mut dock = DockProcess::start(&compositor.wayland, true);
+    let got = dock.run("bind");
+    let node = got
+        .iter()
+        .find_map(|l| l.strip_prefix("STATE ")?.strip_suffix(" 8"))
+        .unwrap()
+        .to_owned();
+    dock.run(&format!("hide {node}"));
+    dock.run("commit");
+    let mut client = compositor.client();
+    client.call(WINDOW_FOCUS, json!({ "id": first })).unwrap();
+    dock.run("sync");
+    client.call(WINDOW_FOCUS, json!({ "id": second })).unwrap();
+    let log = dock.run("sync");
+    assert!(
+        log.iter().any(|l| l == &format!("STATE {node} 8")),
+        "the hidden window took the focus: {log:?}"
+    );
+    assert_eq!(windows(&compositor).len(), 2, "and it is on screen");
+}

@@ -369,8 +369,9 @@ impl State {
         let Some(window) = window else {
             return;
         };
-        // A window of a hidden app: the whole app comes back.
+        // A window of a hidden app: the whole app comes back; one on another space shows.
         self.unhide_for(&window);
+        self.dock_unhide(&window);
         // Like a click on the app in the Dock (dock.md, D-03): all the app windows on screen
         // come forward in their order, with the requested one on top. A minimized window
         // comes back by itself (the Dock, if they are all minimized, asks for the last one).
