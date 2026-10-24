@@ -168,7 +168,21 @@ struct OutputSurface {
     /// The next frame is drawn even if the scene did not change: the display was reset or a
     /// frame was lost.
     redraw: bool,
+    /// Swapchain buffers that may still lack the last change. Each frame goes into the next
+    /// buffer, so after a change the others are brought up to date once the scene has been
+    /// still for [`SETTLE`]: left for later, the first pointer motion would composite a frame
+    /// to do it.
+    stale: u8,
+    /// When the scene last changed.
+    changed_at: Instant,
 }
+
+/// The swapchain buffers besides the one on screen, at most: what a change leaves behind.
+const STALE_BUFFERS: u8 = 2;
+
+/// A scene still for this long is taken as settled and its stale buffers are brought up to
+/// date: longer than the frame interval of any animation, so an animation never draws them.
+const SETTLE: Duration = Duration::from_millis(100);
 
 /// The hotspot of a virtual GPU's cursor plane (virtio-gpu, …): its host draws the cursor
 /// itself and needs to know where the pointer is in the image. The kernel shows such a plane
@@ -394,7 +408,11 @@ fn render_surface(
         .map_err(|e| format!("damage: {e}"))?
         .0
         .is_some_and(|damage| !damage.is_empty());
-    if !std::mem::take(&mut surface.redraw) && !changed {
+    if changed {
+        surface.changed_at = Instant::now();
+    }
+    let catch_up = surface.stale > 0 && surface.changed_at.elapsed() >= SETTLE;
+    if !std::mem::take(&mut surface.redraw) && !changed && !catch_up {
         return Ok(None);
     }
     // A frame that fails leaves the screen behind the scene the tracker saw.
@@ -405,6 +423,8 @@ fn render_surface(
         .map_err(|e| format!("render: {e}"))?;
     surface.redraw = false;
     if frame.is_empty {
+        // The buffer had it all: so do the others, older ones having been drawn after it.
+        surface.stale = 0;
         return Ok(None);
     }
     let needs_sync = frame.needs_sync();
@@ -413,6 +433,13 @@ fn render_surface(
             let commit = element.damage.current_commit();
             let composited = surface.drawn != Some(commit);
             surface.drawn = Some(commit);
+            if composited {
+                surface.stale = if changed {
+                    STALE_BUFFERS
+                } else {
+                    surface.stale.saturating_sub(1)
+                };
+            }
             (composited, false, needs_sync.then(|| element.sync.clone()))
         }
         PrimaryPlaneElement::Element(_) => {
@@ -494,6 +521,8 @@ fn create_surface(
         hotspot,
         changes: OutputDamageTracker::from_output(output),
         redraw: true,
+        stale: 0,
+        changed_at: Instant::now(),
     })
 }
 
