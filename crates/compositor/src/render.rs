@@ -792,7 +792,9 @@ fn after_insert(index: usize, at: usize) -> usize {
 
 /// The output elements, from the front to the back.
 /// The elements of a window the Dock places at `place`: the frame's top-left corner at
-/// (`place.x`, `place.y`), the whole frame scaled by `place.scale`.
+/// (`place.x`, `place.y`), the whole frame scaled by `place.scale`. With an opacity below 1 or
+/// a clip rectangle the window is drawn into a texture of its own first, which is then faded
+/// and cut (a window being faded, a thumbnail in the spaces bar).
 #[allow(clippy::too_many_arguments)]
 fn placed_elements(
     renderer: &mut SilicaRenderer,
@@ -808,7 +810,7 @@ fn placed_elements(
     let frame = frame_rect(window, at.1);
     let target = crate::dock_control::placement_rect(frame, place);
     let (offset, factor) = fit(frame, target);
-    window_elements(
+    let elements = window_elements(
         renderer,
         shaders,
         at,
@@ -820,7 +822,52 @@ fn placed_elements(
         factor,
         ButtonsLook::default(),
         dark,
-    )
+    );
+    if place.opacity >= 0.999 && place.clip.is_none() {
+        return elements;
+    }
+    let Some(mut bbox) = elements
+        .iter()
+        .map(|element| {
+            smithay::backend::renderer::element::Element::geometry(element, scale.into())
+        })
+        .reduce(|a, b| a.merge(b))
+        .and_then(|b| b.intersection(Rectangle::from_size(output_size)))
+    else {
+        return Vec::new();
+    };
+    if let Some(clip) = place.clip {
+        let mut clip = clip;
+        clip.loc -= output_origin.to_f64();
+        let Some(cut) = bbox.intersection(clip.to_physical(scale).to_i32_round()) else {
+            return Vec::new();
+        };
+        bbox = cut;
+    }
+    match compositor_render::glass::render_to_texture(renderer, &elements, bbox, scale, [0.0; 4]) {
+        Ok(texture) => {
+            let element = TextureRenderElement::from_static_texture(
+                Id::new(),
+                renderer.context_id(),
+                bbox.loc.to_f64(),
+                texture.clone(),
+                1,
+                Transform::Normal,
+                Some(place.opacity as f32),
+                None,
+                Some(texture.size().to_logical(1, Transform::Normal)),
+                None,
+                Kind::Unspecified,
+            );
+            vec![OutputElement::Texture(RescaleRenderElement::from_element(
+                element, bbox.loc, 1.0,
+            ))]
+        }
+        Err(err) => {
+            warn!("placed window skipped in this frame: {err:?}");
+            Vec::new()
+        }
+    }
 }
 
 pub fn output_elements(

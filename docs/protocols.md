@@ -157,9 +157,10 @@ behaviour: silica-os/dock `docs/spec/spaces.md` and `panorama.md`.
     frame (shadow included) scaled by `scale`; a window can have several placements (indices
     from 0: large in Panorama, small in the spaces bar); `level` `stack` is in the window
     stack, `above_top` above the Top layer and below the Overlay layer (inside the bar). While
-    a node has a placement it is drawn there and nowhere else. v1 draws placements at whole
-    logical pixels, opaque and unclipped (`opacity` and the clip rectangle are accepted and
-    stored: silica-os/compositor#14), and without the glass and popups of the window.
+    a node has a placement it is drawn there and nowhere else. An `opacity` below 1 or a
+    `clip` rectangle make the compositor draw the window into a texture of its own and fade
+    and cut that. v1 draws placements at whole logical pixels and without the glass and
+    popups of the window (silica-os/compositor#14).
   - **warp**: the genie of the minimize effect, deformed by the Dock's `bend`, `top` and
     `bottom` frame by frame into the target (a Dock cell), from the window's picture taken when
     the warp began; above the Top layer, like the compositor's own genie was. The scale

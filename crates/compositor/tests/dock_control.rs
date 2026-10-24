@@ -267,6 +267,23 @@ fn dock_client(socket: &str) {
                     );
                 }
             }
+            // placefx NODE INDEX X Y SCALE OPACITY CLIP_X CLIP_Y CLIP_W CLIP_H
+            Some("placefx") => {
+                if let Some(n) = node(1, &dock) {
+                    n.place(
+                        number(2) as u32,
+                        silica_dock_node_v1::Level::Stack,
+                        number(3),
+                        number(4),
+                        number(5),
+                        number(6),
+                        number(7),
+                        number(8),
+                        number(9),
+                        number(10),
+                    );
+                }
+            }
             Some("unplace") => {
                 if let Some(n) = node(1, &dock) {
                     n.remove_placement(number(2) as u32);
@@ -633,4 +650,40 @@ fn the_dock_drives_the_minimize_effect() {
     dock.run("commit");
     let shot = screenshot(&compositor);
     assert!(red(&shot, 100, 80), "back where it was");
+}
+
+#[test]
+fn a_placement_fades_and_is_clipped() {
+    // A green desktop and a red window at (32, 32) of 200 × 120 (plus its bar).
+    let compositor = Headless::start_with(
+        "dock-fade",
+        (640, 400),
+        &["--background", "00ff00", "--window-origin", "32"],
+    );
+    let _window = TestWindow::open_sized(&compositor.wayland, "fade", (200, 120));
+    let mut dock = DockProcess::start(&compositor.wayland, true);
+    let node = window_node(&dock.run("bind"));
+    // Half opaque, in place: red over green.
+    dock.run(&format!("placefx {node} 0 32 32 1 0.5 0 0 0 0"));
+    dock.run("commit");
+    let shot = screenshot(&compositor);
+    let p = pixel_in(&shot, 640, 100, 100);
+    assert!(
+        (90..170).contains(&p[0]) && (90..170).contains(&p[1]),
+        "half red over half green: {p:?}"
+    );
+    // Clipped to a 60-wide strip from x 32: the rest of the window is not drawn.
+    dock.run(&format!("placefx {node} 0 32 32 1 1 32 0 60 400"));
+    dock.run("commit");
+    let shot = screenshot(&compositor);
+    let inside = pixel_in(&shot, 640, 60, 100);
+    let outside = pixel_in(&shot, 640, 150, 100);
+    assert!(
+        inside[0] > 150 && inside[1] < 90,
+        "inside the clip: {inside:?}"
+    );
+    assert!(
+        outside[0] < 90 && outside[1] > 150,
+        "outside the clip: {outside:?}"
+    );
 }
