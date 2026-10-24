@@ -1420,6 +1420,7 @@ impl State {
             _ => None,
         };
         let lock_surfaces = self.lock_wl_surfaces();
+        let menu_bar = self.menu_bar_view();
         let accessibility = self.accessibility;
         let Backend::Drm(backend) = &mut self.backend else {
             return;
@@ -1446,6 +1447,7 @@ impl State {
             drag_icon,
             window_veil,
             lock_surfaces,
+            menu_bar,
         };
         if let (Some(timer), Some(gles)) = (&mut backend.gpu_timer, backend.renderer.gles()) {
             timer.begin(gles);
@@ -1556,6 +1558,8 @@ impl State {
         // surface (black while locked).
         let context = crate::render::RenderContext {
             lock_surfaces: context.lock_surfaces.as_ref().map(|_| Vec::new()),
+            // The menu bar is on the main display only.
+            menu_bar: Vec::new(),
             ..context
         };
         for extra in backend.extras.iter_mut().filter(|e| !e.pending) {

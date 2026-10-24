@@ -83,6 +83,9 @@ pub struct RenderContext<'a> {
     pub window_veil: Option<Rectangle<i32, Logical>>,
     /// The session is locked: only these lock surfaces are drawn (none: the plain screen).
     pub lock_surfaces: Option<Vec<WlSurface>>,
+    /// The menu bar's surfaces and where they are in the output (#12); empty while the strip
+    /// is not on screen.
+    pub menu_bar: Vec<(WlSurface, Point<i32, Logical>)>,
 }
 
 /// The veil over the window to capture (K-05): `#88bae7` at alpha ~0.51, premultiplied.
@@ -897,6 +900,43 @@ pub fn output_elements(
             Kind::Unspecified,
         )));
     }
+    // The menu bar (#12) over the Dock: first the menus hanging from it, each with the glass
+    // it declares behind it, then its surfaces.
+    for (surface, at) in &context.menu_bar {
+        let location = at.to_f64().to_physical_precise_round(scale);
+        for popup in surface_popup_layers(renderer, surface, Point::default(), location, scale) {
+            elements.extend(popup.elements);
+            anchors.push(GlassAnchor {
+                index: elements.len(),
+                surface: popup.surface,
+                origin: popup.origin,
+                glass: None,
+                dark_from: Some(surface.clone()),
+            });
+        }
+    }
+    for (surface, at) in &context.menu_bar {
+        let location: Point<i32, Physical> = at.to_f64().to_physical_precise_round(scale);
+        elements.extend(
+            render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
+                renderer,
+                surface,
+                location,
+                scale,
+                1.0,
+                Kind::Unspecified,
+            )
+            .into_iter()
+            .map(OutputElement::Surface),
+        );
+        anchors.push(GlassAnchor {
+            index: elements.len(),
+            surface: surface.clone(),
+            origin: location,
+            glass: None,
+            dark_from: None,
+        });
+    }
     let top_start = elements.len();
     push_layers(&mut elements, &mut anchors, renderer, Layer::Top);
 
@@ -1081,10 +1121,9 @@ pub fn output_elements(
     push_layers(&mut elements, &mut anchors, renderer, Layer::Background);
 
     // With the menu bar, the gradient that compresses the highlights at the top of the wallpaper.
-    let has_menubar = layer_map
-        .layers()
-        .any(|layer| layer.namespace() == "menubar");
-    if has_menubar && let Some(program) = shaders.tone {
+    if !context.menu_bar.is_empty()
+        && let Some(program) = shaders.tone
+    {
         let backdrop = output
             .user_data()
             .get_or_insert(compositor_render::backdrop::Backdrop::default);

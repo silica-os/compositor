@@ -198,6 +198,12 @@ impl State {
         for layer in smithay::desktop::layer_map_for_output(&self.output).layers() {
             collect(layer.wl_surface(), &self.output);
         }
+        for surface in self.menu_bar.surfaces() {
+            collect(&surface, &self.output);
+            for (popup, _) in smithay::desktop::PopupManager::popups_for_surface(&surface) {
+                collect(popup.wl_surface(), &self.output);
+            }
+        }
         let dh = self.display_handle.clone();
         for surface in surfaces {
             let Some(client) = surface.client() else {

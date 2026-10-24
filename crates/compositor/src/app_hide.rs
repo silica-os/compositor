@@ -48,7 +48,6 @@ impl State {
             self.space.unmap_elem(window);
             self.hidden_apps.0.push((window.clone(), location));
         }
-        self.prune_popup_menus();
         if self.windowless_front.as_deref() == Some(app) {
             self.set_windowless_front(None);
         }

@@ -1284,10 +1284,9 @@ name = "silica-protocols"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
- "serde",
- "serde_json",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols",
  "wayland-scanner",
  "wayland-server",
 ]

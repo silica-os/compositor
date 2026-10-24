@@ -467,6 +467,12 @@ impl State {
     pub fn usable_area(&self) -> Rectangle<i32, Logical> {
         let map = layer_map_for_output(&self.output);
         let mut zone = map.non_exclusive_zone();
+        // The menu bar's strip (#12) is out of the windows' way.
+        let bar = crate::menu_bar::HEIGHT;
+        if self.menu_bar_visible() && zone.loc.y < bar {
+            zone.size.h -= bar - zone.loc.y;
+            zone.loc.y = bar;
+        }
         if let Some(geometry) = self.space.output_geometry(&self.output) {
             zone.loc += geometry.loc;
         }

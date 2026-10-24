@@ -127,6 +127,7 @@ impl CompositorHandler for State {
         }
 
         self.layer_commit(surface);
+        self.menu_bar_commit(surface);
 
         self.popups.commit(surface);
         if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface)
@@ -158,6 +159,10 @@ impl State {
                 let mut target = self.space.output_geometry(&self.output)?;
                 target.loc -= location;
                 target
+            } else if let Some(at) = self.menu_bar_location(&root) {
+                // A menu of the menu bar (#12): against the screen, from the titles or item.
+                let output = self.space.output_geometry(&self.output)?;
+                Rectangle::new(Point::from((-at.x, -at.y)), output.size)
             } else {
                 // A popup of a shell layer (silica-os/silica-desktop#222): the layer's origin is where
                 // its surface sits in the output.
@@ -298,8 +303,6 @@ impl XdgShellHandler for State {
             }
         }
         self.unpublish_toplevel(&surface);
-        // The parent of a menu is gone (#237).
-        self.dismiss_popup_menus_on(surface.wl_surface());
     }
 
     fn title_changed(&mut self, surface: ToplevelSurface) {

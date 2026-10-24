@@ -112,11 +112,9 @@ pub struct State {
     pub shell_states: std::collections::BTreeMap<String, String>,
     /// The last focused window announced to the shell.
     pub announced_focus: Option<String>,
-    /// The apps' menus for the global menu bar (`silica-menu-v1`, #25).
-    pub app_menus: crate::app_menu::AppMenus,
+    /// The menu bar's surfaces: the frontmost app's titles, the status items (#12).
+    pub menu_bar: crate::menu_bar::MenuBar,
     pub idle_notifications: crate::idle_notify::IdleNotifications,
-    /// The context menus and pop-up buttons the shell draws (`popup_menu.rs`, #241).
-    pub popup_menus: crate::popup_menu::PopupMenus,
     pub seat: Seat<State>,
 
     /// Number of windows opened so far, to cascade them.
@@ -374,7 +372,7 @@ impl State {
             smithay::wayland::shell::xdg::dialog::XdgDialogState::new::<State>(&dh);
         let glass_manager_state = crate::glass::GlassManagerState::new(&dh);
         let window_manager_state = crate::window_appearance::WindowManagerState::new(&dh);
-        let app_menus = crate::app_menu::AppMenus::new(&dh);
+        let menu_bar = crate::menu_bar::MenuBar::new(&dh);
         let idle_notifications = crate::idle_notify::IdleNotifications::new(&dh);
         crate::image_copy::create_globals(&dh);
         let foreign_toplevel_list = crate::shell::toplevel_list(&dh);
@@ -477,9 +475,8 @@ impl State {
             transient_press: false,
             shell_states: std::collections::BTreeMap::new(),
             announced_focus: None,
-            app_menus,
+            menu_bar,
             idle_notifications,
-            popup_menus: crate::popup_menu::PopupMenus::default(),
             seat,
             mapped: 0,
             next_window_id: 0,
@@ -565,7 +562,10 @@ impl State {
                     .map(|(surface, offset)| (surface, (offset + location).to_f64()))
             })
         };
-        in_layer(&[Layer::Overlay, Layer::Top])
+        in_layer(&[Layer::Overlay])
+            // The menu bar and its menus (#12), over the Dock and the other bars.
+            .or_else(|| self.menu_bar_under(pos))
+            .or_else(|| in_layer(&[Layer::Top]))
             .or_else(|| {
                 self.space
                     .element_under(pos)
@@ -603,6 +603,21 @@ impl State {
             send_frames_surface_tree(icon, output, now, Some(Duration::ZERO), |_, _| {
                 Some(output.clone())
             });
+        }
+        // The menu bar's surfaces and their menus (#12).
+        for surface in self.menu_bar.surfaces() {
+            send_frames_surface_tree(&surface, output, now, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
+            for (popup, _) in smithay::desktop::PopupManager::popups_for_surface(&surface) {
+                send_frames_surface_tree(
+                    popup.wl_surface(),
+                    output,
+                    now,
+                    Some(Duration::ZERO),
+                    |_, _| Some(output.clone()),
+                );
+            }
         }
     }
 

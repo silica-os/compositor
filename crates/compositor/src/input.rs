@@ -63,7 +63,8 @@ impl State {
         }
         let over_layer = self
             .layer_under(&[Layer::Overlay, Layer::Top], location)
-            .is_some();
+            .is_some()
+            || self.menu_bar_under(location).is_some();
         // An open menu or panel (#149): its own app's windows lose the pointer (no hover, no
         // tooltips), and everything outside it shows the arrow (the window below does not
         // have the keyboard, so no text cursor).
@@ -222,6 +223,8 @@ impl State {
                         self.focus_layer(&layer);
                     }
                 }
+                // A click in the menu bar is its owner's: the windows keep the focus (#12).
+                None if self.menu_bar_under(location).is_some() => {}
                 // The frame edges resize, even just outside (MU-08).
                 None if let Some((window, edges)) = self.resize_hit(location) => {
                     self.focus_window(Some(window.clone()));

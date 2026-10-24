@@ -52,7 +52,7 @@ pub struct ShellManagerState;
 
 /// The version of `silica_shell_manager_v1` the compositor offers: 10 splits `activate` (one window)
 /// from `activate_app` (all the app's windows, silica-ui#101).
-pub const SHELL_VERSION: u32 = 10;
+pub const SHELL_VERSION: u32 = 11;
 
 impl ShellManagerState {
     pub fn new(dh: &DisplayHandle) -> Self {
@@ -144,7 +144,7 @@ impl State {
         handle.send_title(&title);
         handle.send_app_id(&app_id);
         handle.send_done();
-        self.reannounce_app_menu();
+        self.menu_bar_refresh();
     }
 
     /// The window is closed: it leaves the list.
@@ -237,10 +237,8 @@ impl State {
     /// the focus change callback, with the surface: reading the focus from the keyboard in
     /// there would take its lock again.
     pub fn announce_focus(&mut self, focus: Option<&WlSurface>) {
-        // The frontmost app's menus follow the focus (silica-menu-v1, #25).
-        self.announce_app_menu(focus);
-        // A menu of an app ends when the keyboard goes to another app (#237).
-        self.popup_menus_follow_focus(focus);
+        // The frontmost app's menu titles follow the focus (silica-os/compositor#12).
+        self.menu_bar_follow_focus(focus);
         let identifier = self.identifier_of(focus);
         if self.announced_focus.as_deref() == Some(identifier.as_str()) {
             return;
@@ -448,7 +446,6 @@ impl GlobalDispatch<SilicaShellManagerV1, ShellGlobal> for State {
                 manager.broadcast(topic.clone(), value.clone());
             }
         }
-        state.send_app_menu_to(&manager);
         state.shell_managers.push(manager);
     }
 
@@ -546,24 +543,6 @@ impl Dispatch<SilicaShellManagerV1, ()> for State {
             }
             silica_shell_manager_v1::Request::ClearTransient { surface } => {
                 state.clear_shell_transient(&surface);
-            }
-            silica_shell_manager_v1::Request::ActivateMenuItem { serial, id } => {
-                if !state.activate_menu_item(serial, id) {
-                    info!("shell: menu {serial} is gone, item {id} dropped");
-                }
-            }
-            silica_shell_manager_v1::Request::PopupMenuTransient {
-                serial,
-                surface,
-                region,
-            } => state.set_popup_menu_region(serial, surface, region),
-            silica_shell_manager_v1::Request::PopupMenuChoose { serial, id } => {
-                if !state.choose_popup_menu(serial, id) {
-                    info!("shell: popup menu {serial} is gone or has no item {id}");
-                }
-            }
-            silica_shell_manager_v1::Request::PopupMenuClose { serial } => {
-                state.finish_popup_menu(serial, crate::popup_menu::Ended::Dismissed);
             }
             silica_shell_manager_v1::Request::Destroy => {}
             _ => {}

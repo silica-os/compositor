@@ -12,7 +12,7 @@
     what the shell asks of the compositor.
   </description>
 
-  <interface name="silica_shell_manager_v1" version="10">
+  <interface name="silica_shell_manager_v1" version="11">
     <request name="destroy" type="destructor"/>
 
     <request name="activate">
@@ -237,118 +237,5 @@
       </description>
       <arg name="surface" type="object" interface="wl_surface"/>
     </event>
-
-    <event name="app_menu" since="8">
-      <description summary="the menus of the frontmost app">
-        The menus the frontmost app published with silica-menu-v1, checked and rewritten by
-        the compositor in the same JSON format, in a sealed file of size bytes from offset 0. app_id
-        is the frontmost app (empty with none); serial names the app's menu object for
-        activate_menu_item, 0 (with size 0) when the app published no menus. Sent on binding
-        and every time the frontmost app or its menus change; while a menu or panel of the
-        shell has the keyboard the frontmost app does not change.
-      </description>
-      <arg name="app_id" type="string"/>
-      <arg name="serial" type="uint"/>
-      <arg name="fd" type="fd"/>
-      <arg name="size" type="uint"/>
-    </event>
-
-    <request name="activate_menu_item" since="8">
-      <description summary="an item of the app's menus was chosen">
-        the compositor sends activated with the id to the menu object with this serial, if it still
-        exists; an old serial does nothing.
-      </description>
-      <arg name="serial" type="uint"/>
-      <arg name="id" type="uint"/>
-    </request>
-
-    <enum name="popup_row_kind" since="9">
-      <entry name="item" value="0"/>
-      <entry name="separator" value="1"/>
-      <entry name="section" value="2"/>
-      <entry name="submenu_begin" value="3"/>
-      <entry name="submenu_end" value="4"/>
-    </enum>
-
-    <event name="popup_menu" since="9">
-      <description summary="an app asked for a context menu or a pop-up button's menu">
-        The shell draws it (silica-os/silica-desktop#241). serial names the menu in the requests below.
-        app_id is the owner app (its id for the transient's owner). The anchor is in
-        output coordinates, logical pixels (a 0 × 0 rectangle for a context menu at the
-        pointer, the control for a pop-up button); kind and selected are those of the app's
-        request (0 context, 1 pop-up; selected 0 for none). The rows follow in
-        popup_menu_row events and popup_menu_end closes the list; the shell opens the menu
-        at the end. appearance is the app's window appearance as for window_menu_appearance.
-      </description>
-      <arg name="serial" type="uint"/>
-      <arg name="app_id" type="string"/>
-      <arg name="kind" type="uint"/>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
-      <arg name="width" type="int"/>
-      <arg name="height" type="int"/>
-      <arg name="selected" type="uint"/>
-      <arg name="appearance" type="uint"/>
-    </event>
-
-    <event name="popup_menu_row" since="9">
-      <description summary="a row of the menu that is being sent">
-        kind is a popup_row_kind. id, flags, icon, key and modifiers are those of the app's
-        add_item (flags and icon also of begin_submenu); label also of add_section and
-        begin_submenu; unused fields are empty or 0.
-      </description>
-      <arg name="serial" type="uint"/>
-      <arg name="kind" type="uint"/>
-      <arg name="id" type="uint"/>
-      <arg name="label" type="string"/>
-      <arg name="flags" type="uint"/>
-      <arg name="icon" type="string"/>
-      <arg name="key" type="string"/>
-      <arg name="modifiers" type="uint"/>
-    </event>
-
-    <event name="popup_menu_end" since="9">
-      <description summary="the rows of the menu are complete">
-        The shell may lay the menu out and show it.
-      </description>
-      <arg name="serial" type="uint"/>
-    </event>
-
-    <event name="popup_menu_closed" since="9">
-      <description summary="the compositor ended the menu">
-        A press outside, a change of context, the app or its surface going away: the shell
-        fades the menu out. Sent once per menu, also after popup_menu_close and
-        popup_menu_choose (then the menu is already closing on the shell's side).
-      </description>
-      <arg name="serial" type="uint"/>
-    </event>
-
-    <request name="popup_menu_transient" since="9">
-      <description summary="where the open popup menu is">
-        The shell's surface that draws the menu and the rectangles of the menu and its open
-        submenu (surface coordinates, as set_owned_transient). The compositor already keeps the menu
-        as a transient owned by the app (modal for the app, pass for everything else) from the
-        moment the app showed it; this tells where it is, so that a press on it does not end
-        it. Sent again whenever the rectangles change.
-      </description>
-      <arg name="serial" type="uint"/>
-      <arg name="surface" type="object" interface="wl_surface"/>
-      <arg name="region" type="object" interface="wl_region" allow-null="true"/>
-    </request>
-
-    <request name="popup_menu_choose" since="9">
-      <description summary="the user chose an item of the popup menu">
-        the compositor sends selected(id) to the app and ends the menu. An old serial does nothing.
-      </description>
-      <arg name="serial" type="uint"/>
-      <arg name="id" type="uint"/>
-    </request>
-
-    <request name="popup_menu_close" since="9">
-      <description summary="the user closed the popup menu">
-        Esc, or a click on nothing inside the shell's surface: the app is told dismissed.
-      </description>
-      <arg name="serial" type="uint"/>
-    </request>
   </interface>
 </protocol>

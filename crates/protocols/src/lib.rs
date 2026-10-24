@@ -4,7 +4,8 @@
 //! - `silica-shell-v1` (`xml/silica-shell-v1.xml`): shell commands to the compositor.
 //! - `silica-window-v1` (`xml/silica-window-v1.xml`): appearance of an app window
 //!   (full-size content with the compositor's buttons on top).
-//! - `silica-menu-v1` (`xml/silica-menu-v1.xml`): an app's menus in the global menu bar.
+//! - `silica-menu-bar-v1` (`xml/silica-menu-bar-v1.xml`): surfaces in the compositor's menu
+//!   bar (an app's menu titles, status items).
 //!
 //! The server side (`server`) is for the compositor, the client side (`client`) for the embedder.
 
@@ -150,8 +151,8 @@ pub mod window {
     }
 }
 
-/// `silica-menu-v1`.
-pub mod menu {
+/// `silica-menu-bar-v1`.
+pub mod menu_bar {
     #[cfg(feature = "server")]
     #[allow(
         missing_docs,
@@ -161,16 +162,18 @@ pub mod menu {
         non_upper_case_globals
     )]
     pub mod server {
+        use wayland_protocols::xdg::shell::server::*;
         use wayland_server;
         use wayland_server::protocol::*;
 
         pub mod __interfaces {
+            use wayland_protocols::xdg::shell::server::__interfaces::*;
             use wayland_server::protocol::__interfaces::*;
-            wayland_scanner::generate_interfaces!("xml/silica-menu-v1.xml");
+            wayland_scanner::generate_interfaces!("xml/silica-menu-bar-v1.xml");
         }
         use self::__interfaces::*;
 
-        wayland_scanner::generate_server_code!("xml/silica-menu-v1.xml");
+        wayland_scanner::generate_server_code!("xml/silica-menu-bar-v1.xml");
     }
 
     #[cfg(feature = "client")]
@@ -184,18 +187,15 @@ pub mod menu {
     pub mod client {
         use wayland_client;
         use wayland_client::protocol::*;
+        use wayland_protocols::xdg::shell::client::*;
 
         pub mod __interfaces {
             use wayland_client::protocol::__interfaces::*;
-            wayland_scanner::generate_interfaces!("xml/silica-menu-v1.xml");
+            use wayland_protocols::xdg::shell::client::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-menu-bar-v1.xml");
         }
         use self::__interfaces::*;
 
-        wayland_scanner::generate_client_code!("xml/silica-menu-v1.xml");
+        wayland_scanner::generate_client_code!("xml/silica-menu-bar-v1.xml");
     }
-
-    /// The largest model in bytes (`silica_menu_v1.limits.max_model_size`).
-    pub const MAX_MODEL_SIZE: usize = 262_144;
-
-    pub mod model;
 }

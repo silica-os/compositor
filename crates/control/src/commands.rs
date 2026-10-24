@@ -56,10 +56,8 @@ pub const APP_HIDE: &str = "app.hide";
 pub const APP_HIDE_OTHERS: &str = "app.hide_others";
 /// Brings back every hidden app.
 pub const APP_SHOW_ALL: &str = "app.show_all";
-/// The frontmost app's menus, as the menu bar shows them (silica-menu-v1, #25).
-pub const APP_MENU: &str = "app.menu";
-/// Chooses an item of the frontmost app's menus: `{"id": n}`.
-pub const APP_MENU_ACTIVATE: &str = "app.menu_activate";
+/// The menu bar strip: whether it shows and its surfaces (silica-menu-bar-v1).
+pub const MENU_BAR: &str = "menu_bar.state";
 pub const INPUT_POINTER_MOVE: &str = "input.pointer_move";
 pub const INPUT_POINTER_BUTTON: &str = "input.pointer_button";
 pub const INPUT_CLICK: &str = "input.click";
@@ -700,25 +698,11 @@ pub const CATALOG: &[CommandSpec] = &[
         params: no_params,
     },
     CommandSpec {
-        id: APP_MENU,
-        label: "App menus",
-        description: "The menus the frontmost app published for the menu bar: `app_id`, `serial` (0 if it published none) and `model` (silica-menu-v1 JSON, null if none).",
+        id: MENU_BAR,
+        label: "Menu bar",
+        description: "The menu bar strip: `visible`, the `room` the titles have and its `surfaces` as laid out (`kind` titles or item, `system`, `order`, `x`, `width`, the owner's `pid`).",
         shortcut: None,
         params: no_params,
-    },
-    CommandSpec {
-        id: APP_MENU_ACTIVATE,
-        label: "Choose an app menu item",
-        description: "Chooses the item `id` of the frontmost app's menus, as a click in the menu bar does.",
-        shortcut: None,
-        params: || {
-            json!({
-                "type": "object",
-                "properties": {"id": {"type": "integer", "minimum": 0}},
-                "required": ["id"],
-                "additionalProperties": false
-            })
-        },
     },
     CommandSpec {
         id: APP_FORCE_QUIT_PANEL,

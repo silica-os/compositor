@@ -164,6 +164,7 @@ impl State {
             drag_icon: self.drag_icon_view(),
             window_veil: self.window_veil_view(),
             lock_surfaces,
+            menu_bar: self.menu_bar_view(),
         }
     }
 

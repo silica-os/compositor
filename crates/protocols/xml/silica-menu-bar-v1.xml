@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="silica_menu_bar_v1">
+  <copyright>
+    Copyright © 2026 Silica contributors
+
+    Licensed under MIT OR Apache-2.0.
+  </copyright>
+
+  <description summary="surfaces in the compositor's menu bar">
+    The menu bar is a strip the compositor owns on each output, as WindowServer does on
+    macOS: its geometry, its tone over the wallpaper, auto-hide and the reveal in full screen
+    are decided there. What sits in it comes from clients, each drawing its own part:
+
+    - an app's menu titles (the system menu, the app's name, its menus) on a menu-titles
+      surface, shown only while that app is frontmost. Its last committed buffer stays on
+      screen when the app stops answering, while opening a menu needs the app;
+    - status items, each on its own surface, which the compositor lines up from the right:
+      the system items (from Control Center) first in their order, then the apps' items,
+      newest leftmost.
+
+    Input in these surfaces goes to their owners, which open their menus and popovers as
+    their own xdg_popups attached with get_popup. The surfaces have no xdg role; their size
+    is that of their buffer, and they get the strip's height in configure.
+  </description>
+
+  <interface name="silica_menu_bar_manager_v1" version="1">
+    <description summary="gives surfaces a place in the menu bar"/>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager">
+        The objects made through it stay valid.
+      </description>
+    </request>
+
+    <enum name="error">
+      <entry name="role" value="0" summary="the surface already has a role"/>
+    </enum>
+
+    <enum name="placement">
+      <entry name="system" value="0" summary="a system item (Control Center), rightmost"/>
+      <entry name="app" value="1" summary="an app's item, left of the system items"/>
+    </enum>
+
+    <request name="get_menu_titles">
+      <description summary="the surface of the client's menu titles">
+        The surface shows at the start of the strip while the client is the frontmost app.
+        A client has one at a time; a second one replaces the first.
+      </description>
+      <arg name="id" type="new_id" interface="silica_menu_titles_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <request name="get_status_item">
+      <description summary="a status item's surface">
+        System items are ordered by order, 0 rightmost; app items by creation.
+      </description>
+      <arg name="id" type="new_id" interface="silica_status_item_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="placement" type="uint" enum="placement"/>
+      <arg name="order" type="uint" summary="among the system items, from the right"/>
+    </request>
+  </interface>
+
+  <interface name="silica_menu_titles_v1" version="1">
+    <description summary="an app's menu titles in the menu bar"/>
+
+    <request name="destroy" type="destructor">
+      <description summary="remove the titles from the strip"/>
+    </request>
+
+    <event name="configure">
+      <description summary="the room the titles have">
+        Sent on creation and when the strip or the room changes. The client draws a buffer
+        at most width wide and exactly height tall, then acks.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="width" type="uint" summary="room before the status items, in logical pixels"/>
+      <arg name="height" type="uint" summary="the strip's height, in logical pixels"/>
+    </event>
+
+    <request name="ack_configure">
+      <arg name="serial" type="uint"/>
+    </request>
+
+    <event name="shown">
+      <description summary="the titles are on screen or not">
+        Shown while the client is frontmost and the strip is visible.
+      </description>
+      <arg name="shown" type="uint" summary="1 shown, 0 hidden"/>
+    </event>
+
+    <request name="get_popup">
+      <description summary="attach a popup to the titles">
+        The popup was made with a null parent; it is positioned against this surface.
+      </description>
+      <arg name="popup" type="object" interface="xdg_popup"/>
+    </request>
+  </interface>
+
+  <interface name="silica_status_item_v1" version="1">
+    <description summary="a status item in the menu bar"/>
+
+    <request name="destroy" type="destructor">
+      <description summary="remove the item from the strip"/>
+    </request>
+
+    <event name="configure">
+      <description summary="the strip's height">
+        The client draws a buffer exactly height tall, as wide as the item, then acks.
+      </description>
+      <arg name="serial" type="uint"/>
+      <arg name="height" type="uint" summary="in logical pixels"/>
+    </event>
+
+    <request name="ack_configure">
+      <arg name="serial" type="uint"/>
+    </request>
+
+    <request name="set_visible">
+      <description summary="show or hide the item">
+        A hidden item leaves no gap. Items start visible.
+      </description>
+      <arg name="visible" type="uint" summary="1 visible, 0 hidden"/>
+    </request>
+
+    <request name="get_popup">
+      <description summary="attach a popup to the item"/>
+      <arg name="popup" type="object" interface="xdg_popup"/>
+    </request>
+  </interface>
+</protocol>

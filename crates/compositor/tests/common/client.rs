@@ -7,9 +7,11 @@ use std::path::Path;
 
 use silica_protocols::glass::client::silica_glass_manager_v1::SilicaGlassManagerV1;
 use silica_protocols::glass::client::silica_glass_v1::{self, SilicaGlassV1};
-use silica_protocols::menu::client::silica_menu_manager_v1::{self, SilicaMenuManagerV1};
-use silica_protocols::menu::client::silica_menu_v1::{self, SilicaMenuV1};
-use silica_protocols::menu::client::silica_popup_menu_v1::{self, SilicaPopupMenuV1};
+use silica_protocols::menu_bar::client::silica_menu_bar_manager_v1::{
+    Placement, SilicaMenuBarManagerV1,
+};
+use silica_protocols::menu_bar::client::silica_menu_titles_v1::{self, SilicaMenuTitlesV1};
+use silica_protocols::menu_bar::client::silica_status_item_v1::{self, SilicaStatusItemV1};
 use silica_protocols::window::client::silica_window_manager_v1::SilicaWindowManagerV1;
 use silica_protocols::window::client::silica_window_v1::{self, SilicaWindowV1};
 use wayland_client::protocol::wl_buffer::WlBuffer;
@@ -124,11 +126,10 @@ struct App {
     layer_shell: Option<ZwlrLayerShellV1>,
     /// The size the compositor gave a layer surface (`zwlr_layer_surface_v1.configure`).
     layer_size: Option<(u32, u32)>,
-    /// silica-menu-v1: the manager and the ids of the items chosen in the bar.
-    menu_manager: Option<SilicaMenuManagerV1>,
-    menu_activations: Vec<u32>,
-    /// How the popup menus ended (silica-menu-v1 version 2).
-    popup_results: Vec<PopupResult>,
+    /// silica-menu-bar-v1: the manager, the room the titles got and whether they show.
+    menu_bar: Option<SilicaMenuBarManagerV1>,
+    titles_room: Option<(u32, u32)>,
+    titles_shown: Option<bool>,
     /// xdg-foreign v2: the globals and the handle of this window, once exported.
     exporter: Option<ZxdgExporterV2>,
     importer: Option<ZxdgImporterV2>,
@@ -171,8 +172,8 @@ impl Dispatch<WlRegistry, ()> for App {
                 "zwlr_layer_shell_v1" => {
                     state.layer_shell = Some(registry.bind(name, 1, qh, ()));
                 }
-                "silica_menu_manager_v1" => {
-                    state.menu_manager = Some(registry.bind(name, 2, qh, ()));
+                "silica_menu_bar_manager_v1" => {
+                    state.menu_bar = Some(registry.bind(name, 1, qh, ()));
                 }
                 "zxdg_exporter_v2" => state.exporter = Some(registry.bind(name, 1, qh, ())),
                 "zxdg_importer_v2" => state.importer = Some(registry.bind(name, 1, qh, ())),
@@ -413,43 +414,43 @@ delegate_noop!(App: ignore SilicaGlassV1);
 delegate_noop!(App: ignore SilicaWindowManagerV1);
 delegate_noop!(App: ignore SilicaWindowV1);
 delegate_noop!(App: XdgPositioner);
-delegate_noop!(App: ignore SilicaMenuManagerV1);
+delegate_noop!(App: ignore SilicaMenuBarManagerV1);
 
-/// How a popup menu ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PopupResult {
-    Selected(u32),
-    Dismissed,
-}
-
-impl Dispatch<SilicaPopupMenuV1, ()> for App {
+impl Dispatch<SilicaMenuTitlesV1, ()> for App {
     fn event(
         state: &mut Self,
-        _: &SilicaPopupMenuV1,
-        event: silica_popup_menu_v1::Event,
+        titles: &SilicaMenuTitlesV1,
+        event: silica_menu_titles_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        state.popup_results.push(match event {
-            silica_popup_menu_v1::Event::Selected { id } => PopupResult::Selected(id),
-            silica_popup_menu_v1::Event::Dismissed => PopupResult::Dismissed,
-            _ => return,
-        });
+        match event {
+            silica_menu_titles_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                state.titles_room = Some((width, height));
+                titles.ack_configure(serial);
+            }
+            silica_menu_titles_v1::Event::Shown { shown } => state.titles_shown = Some(shown != 0),
+            _ => {}
+        }
     }
 }
 
-impl Dispatch<SilicaMenuV1, ()> for App {
+impl Dispatch<SilicaStatusItemV1, ()> for App {
     fn event(
-        state: &mut Self,
-        _: &SilicaMenuV1,
-        event: silica_menu_v1::Event,
+        _: &mut Self,
+        item: &SilicaStatusItemV1,
+        event: silica_status_item_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let silica_menu_v1::Event::Activated { id } = event {
-            state.menu_activations.push(id);
+        if let silica_status_item_v1::Event::Configure { serial, .. } = event {
+            item.ack_configure(serial);
         }
     }
 }
@@ -595,8 +596,10 @@ pub struct TestWindow {
     _decoration: Option<ZxdgToplevelDecorationV1>,
     glass: Option<SilicaGlassV1>,
     appearance: Option<SilicaWindowV1>,
-    /// The app's menu object (silica-menu-v1), after the first `set_menu_model`.
-    menu: Option<SilicaMenuV1>,
+    /// The client's menu titles and status items (silica-menu-bar-v1).
+    strip: Vec<(WlSurface, StripObject, WlBuffer)>,
+    /// The next `open_popup` hangs from this part of `strip`.
+    popup_on_strip: Option<usize>,
     /// xdg-foreign: this window exported, or another app's window imported as its parent.
     exported: Option<ZxdgExportedV2>,
     imported: Option<ZxdgImportedV2>,
@@ -609,6 +612,12 @@ pub struct TestWindow {
         WlBuffer,
     )>,
     buffer: WlBuffer,
+}
+
+/// A client's part in the menu bar.
+pub enum StripObject {
+    Titles(SilicaMenuTitlesV1),
+    Item(SilicaStatusItemV1),
 }
 
 /// A glass region for `TestWindow::set_glass`: x, y, width, height, radius,
@@ -737,7 +746,8 @@ impl TestWindow {
             _decoration: decoration,
             glass: None,
             appearance: None,
-            menu: None,
+            strip: Vec::new(),
+            popup_on_strip: None,
             exported: None,
             imported,
             child: None,
@@ -862,7 +872,8 @@ impl TestWindow {
             _decoration: None,
             glass: None,
             appearance: None,
-            menu: None,
+            strip: Vec::new(),
+            popup_on_strip: None,
             exported: None,
             imported: None,
             child: None,
@@ -973,6 +984,17 @@ impl TestWindow {
         let popup = match (&self.popup, &self._layer) {
             (Some((_, parent, _, _)), _) if spec.nested => {
                 xdg_surface.get_popup(Some(parent), &positioner, &qh, ())
+            }
+            // A menu of the menu bar (#12): no xdg parent, the titles or item adopts it.
+            _ if let Some((_, part, _)) =
+                self.popup_on_strip.take().and_then(|i| self.strip.get(i)) =>
+            {
+                let popup = xdg_surface.get_popup(None, &positioner, &qh, ());
+                match part {
+                    StripObject::Titles(titles) => titles.get_popup(&popup),
+                    StripObject::Item(item) => item.get_popup(&popup),
+                }
+                popup
             }
             // The popup of a layer surface (silica-os/silica-desktop#222): no xdg parent, the layer
             // adopts it.
@@ -1638,86 +1660,95 @@ impl TestWindow {
         size
     }
 
-    /// Publishes the app's menus (silica-menu-v1) as this JSON, in a memfd.
+    /// Puts a `width` wide part in the menu bar: the client's titles (`None`) or a status item
+    /// (`Some((system, order))`), drawn in `color`. Returns its index for `strip_part`.
     #[allow(dead_code)]
-    pub fn set_menu_model(&mut self, json: &str) {
+    pub fn add_to_menu_bar(
+        &mut self,
+        item: Option<(bool, u32)>,
+        width: u32,
+        color: [u8; 4],
+    ) -> usize {
         let qh = self.queue.handle();
+        let compositor = self.app.compositor.clone().expect("wl_compositor");
+        let shm = self.app.shm.clone().expect("wl_shm");
         let manager = self
             .app
-            .menu_manager
+            .menu_bar
             .clone()
-            .expect("silica_menu_manager_v1 missing");
-        let menu = self
-            .menu
-            .get_or_insert_with(|| manager.get_menu(&qh, ()))
-            .clone();
+            .expect("silica_menu_bar_manager_v1 missing");
+        let surface = compositor.create_surface(&qh, ());
+        let object = match item {
+            None => StripObject::Titles(manager.get_menu_titles(&surface, &qh, ())),
+            Some((system, order)) => {
+                let placement = if system {
+                    Placement::System
+                } else {
+                    Placement::App
+                };
+                StripObject::Item(manager.get_status_item(&surface, placement, order, &qh, ()))
+            }
+        };
+        self.queue.roundtrip(&mut self.app).unwrap();
+        let h = 32;
+        let pixels: Vec<u8> = std::iter::repeat_n(color, (width * h) as usize)
+            .flatten()
+            .collect();
         let mut file = tempfile::tempfile().unwrap();
-        file.write_all(json.as_bytes()).unwrap();
-        menu.set_model(file.as_fd(), json.len() as u32);
-        // A bad model ends the connection: `disconnected` tells.
-        let _ = self.queue.roundtrip(&mut self.app);
+        file.write_all(&pixels).unwrap();
+        let pool = shm.create_pool(file.as_fd(), (width * h * 4) as i32, &qh, ());
+        let buffer = pool.create_buffer(
+            0,
+            width as i32,
+            h as i32,
+            (width * 4) as i32,
+            wl_shm::Format::Argb8888,
+            &qh,
+            (),
+        );
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage_buffer(0, 0, width as i32, h as i32);
+        surface.commit();
+        self.queue.roundtrip(&mut self.app).unwrap();
+        self.strip.push((surface, object, buffer));
+        self.strip.len() - 1
     }
 
-    /// The app has no menus any more.
+    /// Opens a popup hanging from a part added with `add_to_menu_bar`, as `open_popup`.
     #[allow(dead_code)]
-    pub fn destroy_menu(&mut self) {
-        if let Some(menu) = self.menu.take() {
-            menu.destroy();
+    pub fn open_strip_popup(&mut self, index: usize, spec: PopupSpec) {
+        self.popup_on_strip = Some(index);
+        self.open_popup(spec);
+    }
+
+    /// Shows or hides a status item added with `add_to_menu_bar`.
+    #[allow(dead_code)]
+    pub fn set_item_visible(&mut self, index: usize, visible: bool) {
+        if let Some((_, StripObject::Item(item), _)) = self.strip.get(index) {
+            item.set_visible(u32::from(visible));
         }
         self.queue.roundtrip(&mut self.app).unwrap();
     }
 
-    /// The items chosen in the bar since the last call.
+    /// Removes a part added with `add_to_menu_bar`.
     #[allow(dead_code)]
-    pub fn menu_activations(&mut self) -> Vec<u32> {
+    pub fn remove_from_menu_bar(&mut self, index: usize) {
+        if index < self.strip.len() {
+            let (surface, object, _) = self.strip.remove(index);
+            match object {
+                StripObject::Titles(titles) => titles.destroy(),
+                StripObject::Item(item) => item.destroy(),
+            }
+            surface.destroy();
+        }
         self.queue.roundtrip(&mut self.app).unwrap();
-        std::mem::take(&mut self.app.menu_activations)
     }
 
-    /// Shows a context menu (kind 0) or a pop-up button's menu (1) on this window's surface:
-    /// `rows` are built on the new menu object before `show`.
+    /// The room the titles got and whether they show, as last told.
     #[allow(dead_code)]
-    pub fn show_popup_menu(
-        &mut self,
-        kind: u32,
-        anchor: (i32, i32, i32, i32),
-        selected: u32,
-        rows: impl FnOnce(&SilicaPopupMenuV1),
-    ) -> SilicaPopupMenuV1 {
-        let qh = self.queue.handle();
-        let manager = self
-            .app
-            .menu_manager
-            .clone()
-            .expect("silica_menu_manager_v1 missing");
-        let kind = if kind == 0 {
-            silica_menu_manager_v1::PopupKind::Context
-        } else {
-            silica_menu_manager_v1::PopupKind::PopUp
-        };
-        let menu = manager.get_popup_menu(
-            &self.surface,
-            kind,
-            anchor.0,
-            anchor.1,
-            anchor.2,
-            anchor.3,
-            selected,
-            &qh,
-            (),
-        );
-        rows(&menu);
-        menu.show();
-        // A bad menu ends the connection: `disconnected` tells.
-        let _ = self.queue.roundtrip(&mut self.app);
-        menu
-    }
-
-    /// How the popup menus ended since the last call.
-    #[allow(dead_code)]
-    pub fn popup_results(&mut self) -> Vec<PopupResult> {
-        let _ = self.queue.roundtrip(&mut self.app);
-        std::mem::take(&mut self.app.popup_results)
+    pub fn titles_state(&mut self) -> (Option<(u32, u32)>, Option<bool>) {
+        self.queue.roundtrip(&mut self.app).unwrap();
+        (self.app.titles_room, self.app.titles_shown)
     }
 
     /// Whether the compositor closed the connection (a protocol error).

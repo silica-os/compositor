@@ -3,7 +3,6 @@
 mod accessibility;
 mod app_frames;
 mod app_hide;
-mod app_menu;
 pub mod backend;
 mod capture;
 pub mod commands;
@@ -36,8 +35,8 @@ mod keymap;
 pub mod keys;
 mod layers;
 mod lock;
+mod menu_bar;
 mod perf;
-mod popup_menu;
 mod protocols;
 mod reap;
 mod render;

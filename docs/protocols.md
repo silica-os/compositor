@@ -224,85 +224,35 @@ against other processes of the same user: that will come with the app sandbox.
   otherRule, press, scroll}`, where `press` and `scroll` are the version 6 fallback;
   `clearTransient`) and `silica/shell` (`transientDismissed`).
 
-## Popup menus: context menus and pop-up buttons (silica-os/silica-desktop#241)
+Version 11 drops the menu messages of versions 8 and 9 (`app_menu`, `activate_menu_item`,
+`popup_menu*`): the apps draw their menus themselves (`silica-menu-bar-v1` below).
 
-`silica-menu-v1` version 2: `silica_menu_manager_v1.get_popup_menu(surface, kind, x, y, width,
-height, selected)` creates a `silica_popup_menu_v1`; the app builds the rows with `add_item`,
-`add_separator`, `add_section`, `begin_submenu` / `end_submenu` and makes the menu visible with
-`show`. The compositor answers once with `selected(id)` or `dismissed`. Model, placement, pop-up button
-alignment and the dismissal rules are in `docs/spec/menus.md`.
+## silica-menu-bar-v1: the menu bar strip (#12)
 
-`silica-shell-v1` version 9: the event `popup_menu` (serial, owner app, kind, anchor on the output,
-selected, appearance), the `popup_menu_row` events, `popup_menu_end`, and `popup_menu_closed`
-when the compositor ended the menu; the requests `popup_menu_transient` (where the shell drew the menu),
-`popup_menu_choose` and `popup_menu_close`. From `show` the menu is also a transient owned by the
-app (modal for the app, `pass` for the rest), so every dismissal goes through `transient.rs`.
-The embedder exposes it to Dart as `popupMenu` / `popupMenuClosed` on `silica/shell` (shell side)
-and `silica/popupmenu` (app side, `popup_menu.rs`).
+The strip belongs to the compositor, as WindowServer's menu bar on macOS: it is 32 points tall
+on the main display, transparent over the tone that softens the top of the wallpaper, hidden
+while a window is full screen in front, and out of the windows' way (`usable_area`). What sits
+in it comes from clients, each drawing its own part on a surface without an xdg role:
 
-## silica-menu-v1: the apps' menus in the menu bar
+- `silica_menu_bar_manager_v1.get_menu_titles(surface)`: the client's menu titles (the system
+  menu, the app's name, its menus), at the start of the strip while the client is the
+  frontmost app (the focused window's, else the windowless frontmost app or the desktop's
+  owner). `configure(serial, width, height)` gives the room before the status items and the
+  strip's height; `shown(1|0)` tells whether the titles are on screen. The last committed
+  buffer stays on screen when the app hangs. A menu or popover of the strip taking the
+  keyboard leaves the app in front as it is.
+- `get_status_item(surface, placement, order)`: a status item, as wide as its buffer.
+  The compositor lines the visible items up from 8 points before the right edge: the
+  `system` items (Control Center) by `order`, 0 rightmost, then the apps' items, the newest
+  leftmost. `set_visible(0)` hides one without leaving a gap.
+- `get_popup(xdg_popup)` on either attaches a popup made with a null parent: the owner opens
+  its menus and popovers as its own popups, placed against the screen like a layer's
+  (silica-os/compositor#13 removed the shell-drawn popup menus of `silica-menu-v1`). Its
+  grab is the owner's menu as for any app popup, except that the titles or item it hangs
+  from stay live, so the pointer can track across the titles; when it closes the keyboard
+  goes back where it was before.
 
-An app publishes its menus (app menu, File, Edit, View, Window, Help and its own) and the menu
-bar shows those of the frontmost app (silica-os/silica-desktop#25).
-
-- `silica_menu_manager_v1.get_menu` gives the client's `silica_menu_v1` (one per client: the
-  menus belong to the app, which updates them when its active window changes).
-- `silica_menu_v1.set_model(fd, size)` replaces the whole model: UTF-8 JSON in a file
-  (a sealed memfd), at most 256 KiB, read at once from offset 0. The format:
-
-  ```json
-  {"menus": [
-    {"label": "Calculator", "role": "app", "items": [
-      {"id": 1, "label": "", "role": "about"},
-      {"separator": true},
-      {"label": "", "role": "quit"}
-    ]},
-    {"label": "View", "items": [
-      {"id": 3, "label": "Basic", "checked": true,
-       "shortcut": {"key": "1", "meta": true}},
-      {"id": 4, "label": "Decimal Places", "items": [{"id": 5, "label": "8"}]}
-    ]}
-  ]}
-  ```
-
-  `role` on a menu: `app`, `window`, `help`. On an item: a system item the bar runs itself
-  when it has no `id` (`quit`, `services`, `hide`, `hide_others`, `show_all`, `close`,
-  `minimize`, `fullscreen`, `bring_all_to_front`), or the standard meaning of an app item
-  (`about`, `settings`, `undo`, `redo`, `cut`, `copy`, `paste`, `delete`, `select_all`,
-  `help`), which lets the bar give it its label and shortcut in the user's language when the
-  app leaves `label` empty. `shortcut.meta` is ⌘ (the Logo key). Unknown keys are ignored.
-  Limits: 32 menus, 4096 items, items at most 4 levels below a top-level menu, labels of 256
-  bytes; a model past them, unreadable or not JSON is the `invalid_model` error (the client
-  is disconnected, the compositor goes on). The compositor keeps it in normal form (`model.rs` in
-  `silica-protocols`: defaults written out, unknown keys dropped); the embedder checks it with
-  the same code before sending.
-- event `silica_menu_v1.activated(id)`: the user chose the item in the bar. The model may have
-  changed in between: the app ignores ids it no longer knows.
-- Shell side (`silica_shell_manager_v1` version 8): the event `app_menu(app_id, serial, fd,
-  size)` carries the frontmost app's model in normal form (sealed memfd, read from offset 0),
-  on binding and whenever the frontmost app or its model changes; `serial` 0 and `size` 0
-  when that app published none. While a shell menu has the keyboard the frontmost app stays
-  the window on top, as for `focused`. `activate_menu_item(serial, id)` sends the choice back;
-  an old serial does nothing.
-- Control channel: `app.menu` and `app.menu_activate` (`docs/control.md`).
-
-Keyboard shortcuts stay inside the app: the model only shows them. The app handles its keys
-itself while it has the keyboard (silica_ui's `SilicaMenuBar` binds the shortcuts of its
-items), and the system ones (⌘Q, ⌘W, ⌘M) are the compositor's catalog shortcuts.
-
-Why a Wayland protocol and not a D-Bus menu model (`org.gtk.Menus`, `com.canonical.dbusmenu`):
-the menus are tied to a client and its windows, which only the compositor knows (focus, the
-windowless frontmost app, the desktop's owner), and the compositor already brokers the shell's state
-over `silica-shell-v1`; a D-Bus model would need a second channel, a registration step to tie
-a bus name to a surface (KDE's `org_kde_kwin_appmenu`, GTK's `gtk_shell1`) and a menu/action
-split to keep in sync. One JSON document per change is also what Flutter's own
-`PlatformMenuDelegate` produces. Third-party GTK and Qt menus can come later as a bridge that
-reads their D-Bus model and publishes it here.
-
-On the app side the embedder exposes the `silica/menu` channel (`setMenus`, `clearMenus`,
-`isSupported`; `activated id` back), and on the shell side `silica/shell` gets `appMenu`
-and `activateMenuItem` (`crates/embedder/src/menu.rs`). Apps use silica_ui's `SilicaMenuBar`
-(adoption guide in silica-ui, `docs/app-menus.md`).
+Control channel: `menu_bar.state` (`docs/control.md`).
 
 ## Drag between apps (`wl_data_device`)
 

@@ -109,13 +109,6 @@ pub enum Source {
     },
     /// An app popup with a grab, closed with `popup_done`.
     Popup { popup: PopupKind, root: WlSurface },
-    /// A context menu or pop-up button of an app, drawn by the shell (`popup_menu.rs`); the
-    /// shell's surface is known once it reports where the menu is.
-    PopupMenu {
-        serial: u32,
-        object: silica_protocols::menu::server::silica_popup_menu_v1::SilicaPopupMenuV1,
-        surface: Option<WlSurface>,
-    },
 }
 
 /// The app whose surfaces follow the owner rule.
@@ -159,7 +152,6 @@ impl Transient {
         match &self.source {
             Source::Shell { surface, .. } => Some(surface),
             Source::Popup { root, .. } => Some(root),
-            Source::PopupMenu { surface, .. } => surface.as_ref(),
         }
     }
 
@@ -167,7 +159,6 @@ impl Transient {
         match &self.source {
             Source::Shell { surface, manager } => surface.is_alive() && manager.is_alive(),
             Source::Popup { popup, .. } => popup.alive(),
-            Source::PopupMenu { object, .. } => object.is_alive(),
         }
     }
 }
@@ -330,15 +321,17 @@ impl State {
                     .any(|rect| rect.to_f64().contains(location));
                 let on_source = match &transient.source {
                     Source::Shell { surface, .. } => under.root.as_ref() == Some(surface),
-                    Source::PopupMenu { surface, .. } => {
-                        surface.is_some() && under.root.as_ref() == surface.as_ref()
-                    }
                     // The popup and the popups next to it (submenus) on the same window.
-                    Source::Popup { root, .. } => under
-                        .surface
-                        .as_ref()
-                        .and_then(|s| popup_root_of(&self.popups, s))
-                        .is_some_and(|popup_root| popup_root == *root),
+                    Source::Popup { root, .. } => {
+                        under
+                            .surface
+                            .as_ref()
+                            .and_then(|s| popup_root_of(&self.popups, s))
+                            .is_some_and(|popup_root| popup_root == *root)
+                            // A menu of the menu bar: the titles it hangs from too, which
+                            // track across to the next menu (#12).
+                            || (under.root.as_ref() == Some(root) && self.menu_bar.owns(root))
+                    }
                 };
                 if in_region || on_source {
                     return Place::Inside;
@@ -427,6 +420,9 @@ impl State {
             }
             return;
         }
+        if self.menu_bar_under(location).is_some() {
+            return;
+        }
         match self.window_hit(location) {
             Some(crate::decorations::Hit::Titlebar(window, _, _))
             | Some(crate::decorations::Hit::Content(window)) => self.focus_window(Some(window)),
@@ -455,9 +451,6 @@ impl State {
                     manager.dismissed(&surface);
                 }
             }
-            Source::PopupMenu { serial, .. } => {
-                self.finish_popup_menu(serial, crate::popup_menu::Ended::Dismissed);
-            }
             Source::Popup { popup, root } => {
                 if let Err(err) = PopupManager::dismiss_popup(&root, &popup) {
                     tracing::warn!("popup dismiss: {err}");
@@ -468,11 +461,8 @@ impl State {
                         .current_focus()
                         .is_some_and(|focus| focus == *popup.wl_surface())
                 {
-                    keyboard.set_focus(
-                        self,
-                        Some(root),
-                        smithay::utils::SERIAL_COUNTER.next_serial(),
-                    );
+                    let next = self.keyboard_after_popup(root);
+                    keyboard.set_focus(self, next, smithay::utils::SERIAL_COUNTER.next_serial());
                 }
             }
         }
@@ -551,11 +541,8 @@ impl State {
             && let (Some(keyboard), Some(parent)) = (self.seat.get_keyboard(), parent)
             && parent.is_alive()
         {
-            keyboard.set_focus(
-                self,
-                Some(parent),
-                smithay::utils::SERIAL_COUNTER.next_serial(),
-            );
+            let next = self.keyboard_after_popup(parent);
+            keyboard.set_focus(self, next, smithay::utils::SERIAL_COUNTER.next_serial());
         }
         if self.transients.len() != before {
             self.refresh_pointer();
@@ -568,6 +555,7 @@ impl State {
         let Ok(root) = find_popup_root_surface(&popup) else {
             return;
         };
+        self.menu_bar_grab(&root);
         let surface = popup.wl_surface().clone();
         let owner = match surface.client() {
             Some(client) => OwnerApp::Client(client.id()),
@@ -584,7 +572,7 @@ impl State {
                 Source::Popup { popup: p, root: r } => {
                     r != &root || ancestors.contains(p.wl_surface())
                 }
-                Source::Shell { .. } | Source::PopupMenu { .. } => true,
+                Source::Shell { .. } => true,
             });
         self.transients = keep;
         for transient in replaced {
