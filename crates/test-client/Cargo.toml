@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+gbm = { version = "0.18", default-features = false }
 rustix = { version = "1", features = ["fs", "mm"] }
 serde_json = "1"
 silica-control = { path = "../control" }

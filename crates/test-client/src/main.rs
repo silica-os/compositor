@@ -2,7 +2,7 @@
 //! frame callback, for checks of the compositor in the VM.
 //!
 //! ```text
-//! silica-test-client [--color RRGGBB] [--size WxH] [--damage WxH] [--seconds N]
+//! silica-test-client [--color RRGGBB] [--size WxH] [--damage WxH] [--scanout] [--seconds N]
 //! silica-test-client --scene [--seconds N]
 //! silica-test-client --jit
 //! ```
@@ -10,6 +10,10 @@
 //! It prints `configured WxH` when the window is mapped, then `frames N` once per second, and
 //! exits after `--seconds` (default: until the window is closed). Each frame damages the whole
 //! window, or only a centered `--damage` rectangle, as a spinner would.
+//!
+//! `--scanout` asks for full screen and draws into a GBM buffer object shared as a dmabuf
+//! (linear XRGB8888, on `/dev/dri/renderD128`): the case where the display scans the client's
+//! buffer out directly.
 //!
 //! `--scene` maps the desktop that the CPU frame budget is measured on and drags a window
 //! across it for `--seconds` (default 10), then prints what `perf.render` measured
@@ -33,6 +37,10 @@ use wayland_client::protocol::wl_shm::{self, WlShm};
 use wayland_client::protocol::wl_shm_pool::WlShmPool;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Dispatch, QueueHandle, delegate_noop};
+use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_buffer_params_v1::{
+    self, ZwpLinuxBufferParamsV1,
+};
+use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
 use wayland_protocols::xdg::shell::client::xdg_surface::{self, XdgSurface};
 use wayland_protocols::xdg::shell::client::xdg_toplevel::{self, XdgToplevel};
 use wayland_protocols::xdg::shell::client::xdg_wm_base::{self, XdgWmBase};
@@ -42,18 +50,25 @@ struct Options {
     color: u32,
     size: (i32, i32),
     damage: Option<(i32, i32)>,
+    scanout: bool,
     seconds: Option<u64>,
 }
+
+/// The render node `--scanout` allocates on: the VM's only GPU.
+const RENDER_NODE: &str = "/dev/dri/renderD128";
 
 #[derive(Default)]
 struct State {
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
+    dmabuf: Option<ZwpLinuxDmabufV1>,
     wm_base: Option<XdgWmBase>,
     surface: Option<WlSurface>,
     /// The window's buffer, attached again on each frame: a commit without a buffer brings
     /// no damage.
     buffer: Option<WlBuffer>,
+    /// With `--scanout`, the GBM buffer object behind `buffer`.
+    scanout: Option<gbm::BufferObject<()>>,
     size: (i32, i32),
     damage: Option<(i32, i32)>,
     configured: bool,
@@ -141,6 +156,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
         color: 0xffd0_3030,
         size: (480, 320),
         damage: None,
+        scanout: false,
         seconds: None,
     };
     while let Some(arg) = args.next() {
@@ -157,6 +173,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
             }
             "--size" => options.size = size(&value()?)?,
             "--damage" => options.damage = Some(size(&value()?)?),
+            "--scanout" => options.scanout = true,
             "--seconds" => {
                 let text = value()?;
                 options.seconds = Some(
@@ -196,11 +213,17 @@ fn run(options: &Options) -> Result<(), String> {
     if state.shm.is_none() {
         return Err("the compositor lacks wl_shm".into());
     }
+    if options.scanout && state.dmabuf.is_none() {
+        return Err("the compositor lacks zwp_linux_dmabuf_v1 version 2".into());
+    }
     let surface = compositor.create_surface(&qh, ());
     let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
     let toplevel = xdg_surface.get_toplevel(&qh, ());
     toplevel.set_title("Silica test client".into());
     toplevel.set_app_id("dev.frascella.Silica.TestClient".into());
+    if options.scanout {
+        toplevel.set_fullscreen(None);
+    }
     surface.commit();
     state.surface = Some(surface);
 
@@ -213,7 +236,11 @@ fn run(options: &Options) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         if state.configured && !drawn {
             println!("configured {}x{}", state.size.0, state.size.1);
-            draw(&mut state, options.color, &qh)?;
+            if options.scanout {
+                draw_dmabuf(&mut state, options.color, &qh)?;
+            } else {
+                draw(&mut state, options.color, &qh)?;
+            }
             drawn = true;
         }
         if reported.elapsed() >= Duration::from_secs(1) {
@@ -262,6 +289,63 @@ fn draw(state: &mut State, color: u32, qh: &QueueHandle<State>) -> Result<(), St
     Ok(())
 }
 
+/// As `draw`, into a GBM buffer object that the display can scan out, shared as a dmabuf.
+fn draw_dmabuf(state: &mut State, color: u32, qh: &QueueHandle<State>) -> Result<(), String> {
+    let (Some(dmabuf), Some(surface)) = (&state.dmabuf, &state.surface) else {
+        return Ok(());
+    };
+    let node = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(RENDER_NODE)
+        .map_err(|e| format!("{RENDER_NODE}: {e}"))?;
+    let device = gbm::Device::new(node).map_err(|e| format!("GBM: {e}"))?;
+    let (w, h) = state.size;
+    let width = u32::try_from(w).map_err(|e| e.to_string())?;
+    let height = u32::try_from(h).map_err(|e| e.to_string())?;
+    let mut bo = device
+        .create_buffer_object::<()>(
+            width,
+            height,
+            gbm::Format::Xrgb8888,
+            gbm::BufferObjectFlags::SCANOUT | gbm::BufferObjectFlags::LINEAR,
+        )
+        .map_err(|e| format!("GBM buffer: {e}"))?;
+    bo.map_mut(0, 0, width, height, |map| {
+        for pixel in map.buffer_mut().as_chunks_mut::<4>().0 {
+            *pixel = color.to_le_bytes();
+        }
+    })
+    .map_err(|e| format!("GBM map: {e}"))?;
+    let fd = bo.fd_for_plane(0).map_err(|e| format!("dmabuf: {e}"))?;
+    let modifier = u64::from(bo.modifier());
+    let params = dmabuf.create_params(qh, ());
+    params.add(
+        fd.as_fd(),
+        0,
+        bo.offset(0),
+        bo.stride_for_plane(0),
+        u32::try_from(modifier >> 32).map_err(|e| e.to_string())?,
+        u32::try_from(modifier & 0xffff_ffff).map_err(|e| e.to_string())?,
+    );
+    let buffer = params.create_immed(
+        w,
+        h,
+        gbm::Format::Xrgb8888 as u32,
+        zwp_linux_buffer_params_v1::Flags::empty(),
+        qh,
+        (),
+    );
+    params.destroy();
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage_buffer(0, 0, w, h);
+    surface.frame(qh, ());
+    surface.commit();
+    state.buffer = Some(buffer);
+    state.scanout = Some(bo);
+    Ok(())
+}
+
 impl Dispatch<WlRegistry, ()> for State {
     fn event(
         state: &mut Self,
@@ -272,12 +356,18 @@ impl Dispatch<WlRegistry, ()> for State {
         qh: &QueueHandle<Self>,
     ) {
         if let wl_registry::Event::Global {
-            name, interface, ..
+            name,
+            interface,
+            version,
         } = event
         {
             match interface.as_str() {
                 "wl_compositor" => state.compositor = Some(registry.bind(name, 4, qh, ())),
                 "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
+                // `create_immed` came with version 2.
+                "zwp_linux_dmabuf_v1" if version >= 2 => {
+                    state.dmabuf = Some(registry.bind(name, version.min(3), qh, ()));
+                }
                 "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
                 _ => {}
             }
@@ -376,5 +466,7 @@ impl Dispatch<WlBuffer, ()> for State {
 
 delegate_noop!(State: ignore WlCompositor);
 delegate_noop!(State: ignore WlShm);
+delegate_noop!(State: ignore ZwpLinuxDmabufV1);
+delegate_noop!(State: ignore ZwpLinuxBufferParamsV1);
 delegate_noop!(State: ignore WlShmPool);
 delegate_noop!(State: ignore WlSurface);
