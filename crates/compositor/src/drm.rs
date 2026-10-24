@@ -24,6 +24,7 @@ use smithay::backend::egl::EGLDevice;
 use smithay::backend::input::InputEvent;
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::Bind;
+use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::utils::CommitCounter;
@@ -160,6 +161,13 @@ struct OutputSurface {
     waiting: Option<(u64, Option<OutputPresentationFeedback>)>,
     /// The cursor plane's hotspot, on a virtual GPU.
     hotspot: Option<CursorHotspot>,
+    /// The scene's damage since the last frame, at age 1: a tick whose scene did not change
+    /// draws nothing. The swapchain's next buffer is older than the frame on screen, and its age
+    /// alone would draw the last changes again, for a frame that shows the same.
+    changes: OutputDamageTracker,
+    /// The next frame is drawn even if the scene did not change: the display was reset or a
+    /// frame was lost.
+    redraw: bool,
 }
 
 /// The hotspot of a virtual GPU's cursor plane (virtio-gpu, …): its host draws the cursor
@@ -380,10 +388,22 @@ fn render_surface(
     feedback: Option<OutputPresentationFeedback>,
 ) -> Result<Option<Queued>, String> {
     let start = Instant::now();
+    let changed = surface
+        .changes
+        .damage_output(1, elements)
+        .map_err(|e| format!("damage: {e}"))?
+        .0
+        .is_some_and(|damage| !damage.is_empty());
+    if !std::mem::take(&mut surface.redraw) && !changed {
+        return Ok(None);
+    }
+    // A frame that fails leaves the screen behind the scene the tracker saw.
+    surface.redraw = true;
     let frame = surface
         .compositor
         .render_frame(renderer, elements, clear_color, FrameFlags::DEFAULT)
         .map_err(|e| format!("render: {e}"))?;
+    surface.redraw = false;
     if frame.is_empty {
         return Ok(None);
     }
@@ -424,10 +444,10 @@ fn render_surface(
             }
         }
     }
-    surface
-        .compositor
-        .queue_frame(feedback)
-        .map_err(|e| format!("queue: {e}"))?;
+    if let Err(err) = surface.compositor.queue_frame(feedback) {
+        surface.redraw = true;
+        return Err(format!("queue: {err}"));
+    }
     Ok(Some(queued(drawn.elapsed())))
 }
 
@@ -472,6 +492,8 @@ fn create_surface(
         drawn: None,
         waiting: None,
         hotspot,
+        changes: OutputDamageTracker::from_output(output),
+        redraw: true,
     })
 }
 
@@ -829,6 +851,7 @@ impl State {
         for surface in surfaces {
             // A frame waiting for the GPU is dropped: the next one is drawn whole.
             surface.waiting = None;
+            surface.redraw = true;
             // Whoever had the display may have moved the hotspot.
             if let Some(hotspot) = &mut surface.hotspot {
                 hotspot.set = None;
@@ -899,6 +922,7 @@ impl State {
         };
         if let Err(err) = surface.compositor.queue_frame(feedback) {
             warn!("DRM: queue: {err}");
+            surface.redraw = true;
             *pending = false;
         }
     }
@@ -1233,6 +1257,7 @@ impl State {
         };
         if on {
             surface.compositor.reset_buffers();
+            surface.redraw = true;
             backend.pending = false;
             self.render_drm();
         } else {
@@ -1426,6 +1451,8 @@ impl State {
             glass: compositor_render::glass::take_times(),
             ..Default::default()
         };
+        // The glass's offscreen draws are its own stages: from here on, the frame's.
+        let _ = compositor_raster::take_times();
         let mut drawn = false;
         let mut planes = None;
         let mut failed = false;
@@ -1557,6 +1584,7 @@ impl State {
             return;
         }
         if drawn {
+            stages.raster = compositor_raster::take_times();
             self.perf.rendered(stages);
         } else if let Some(scanout) = planes {
             self.perf.shown_on_planes(scanout);

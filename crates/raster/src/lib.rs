@@ -11,6 +11,7 @@ mod image;
 mod kernels;
 mod memory;
 
+use std::cell::Cell;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -41,11 +42,35 @@ pub use kernels::{Kernels, Walk};
 
 use exec::{DisplayList, Map, Op};
 
-/// Workers at most: past four, a 1280 × 800 frame waits on memory, not on the cores.
+/// Threads drawing a frame at most, the caller's included: past four, a 1280 × 800 frame waits
+/// on memory, not on the cores.
 const MAX_THREADS: usize = 4;
 
 /// The longest the workers stay awake for one `warm`, should its guard never be dropped.
 const MAX_WARM: Duration = Duration::from_millis(50);
+
+/// Where the frames' time went on this thread, since the last [`take_times`].
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct DrawTimes {
+    /// Running the display lists: the pixels.
+    pub raster: Duration,
+    /// Writing the damage of dmabuf targets back from their shadows.
+    pub write_back: Duration,
+}
+
+thread_local! {
+    static TIMES: Cell<DrawTimes> = const {
+        Cell::new(DrawTimes {
+            raster: Duration::ZERO,
+            write_back: Duration::ZERO,
+        })
+    };
+}
+
+/// The frames' times on this thread since the last call, which start again from zero.
+pub fn take_times() -> DrawTimes {
+    TIMES.with(Cell::take)
+}
 
 /// Keeps the renderer's workers awake while it lives (see [`CpuRenderer::warm`]).
 #[must_use = "the workers sleep again when the guard is dropped"]
@@ -324,25 +349,30 @@ impl Default for CpuRenderer {
 }
 
 impl CpuRenderer {
-    /// A renderer on `SILICA_RENDERER_THREADS` threads, or as many cores as help (at most 4).
+    /// A renderer on `SILICA_RENDERER_THREADS` threads, or on all cores but one (at most 4),
+    /// the caller's included. The core left is the clients': with every core held by a frame,
+    /// a client that wakes takes one from a thread in the middle of its band, and the frame
+    /// waits for its time slice.
     pub fn new() -> Self {
         let threads = std::env::var("SILICA_RENDERER_THREADS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or_else(|| {
                 std::thread::available_parallelism()
-                    .map_or(1, |n| n.get())
-                    .min(MAX_THREADS)
+                    .map_or(1, |n| n.get().saturating_sub(1))
+                    .clamp(1, MAX_THREADS)
             });
         Self::with_threads(threads)
     }
 
-    /// A renderer drawing large frames on `threads` threads (1: on the caller's).
+    /// A renderer drawing large frames on `threads` threads: the caller's and `threads - 1`
+    /// workers. Never more workers than that: held warm over a frame, they would take the cores
+    /// from the caller, which draws its share and does the frame's serial work.
     pub fn with_threads(threads: usize) -> Self {
         let pool = (threads > 1)
             .then(|| {
                 ThreadPoolBuilder::new()
-                    .num_threads(threads)
+                    .num_threads(threads - 1)
                     .thread_name(|i| format!("raster-{i}"))
                     .build()
                     .inspect_err(|err| tracing::warn!("CPU renderer on one thread: {err}"))
@@ -411,11 +441,11 @@ impl CpuRenderer {
         exec::rows_from(self.pool.as_ref(), data, width, (band + 1, ROWS), f);
     }
 
-    /// The threads a large frame runs on.
+    /// The threads a large frame runs on, the caller's included.
     pub fn threads(&self) -> usize {
         self.pool
             .as_ref()
-            .map_or(1, ThreadPool::current_num_threads)
+            .map_or(1, |pool| pool.current_num_threads() + 1)
     }
 
     /// The dmabuf formats the renderer reads and draws into: ours, linear.
@@ -767,17 +797,25 @@ impl CpuFrame<'_, '_> {
             return Ok(());
         }
         let texture = self.target.texture().clone();
+        let start = Instant::now();
         self.list.execute(
             &mut texture.write(),
             self.renderer.kernels,
             self.renderer.pool.as_ref(),
         );
+        let executed = Instant::now();
         let result = match &self.target.0 {
             Target::Dmabuf { dmabuf, shadow } => {
                 self.renderer.write_back(dmabuf, shadow, self.list.rects())
             }
             Target::Texture(_) => Ok(()),
         };
+        TIMES.with(|times| {
+            let mut now = times.get();
+            now.raster += executed - start;
+            now.write_back += executed.elapsed();
+            times.set(now);
+        });
         self.renderer.list = std::mem::take(&mut self.list);
         result
     }

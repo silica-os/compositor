@@ -55,6 +55,8 @@ pub struct RenderStages {
     pub submit: Duration,
     /// The glass's share of `build`.
     pub glass: compositor_render::glass::GlassTimes,
+    /// The CPU renderer's share of `draw`: the pixels, and the copy into a dmabuf.
+    pub raster: compositor_raster::DrawTimes,
 }
 
 impl RenderStages {
@@ -196,6 +198,14 @@ impl Perf {
             stage(
                 "glass.material",
                 self.renders.iter().map(|r| r.glass.material).collect(),
+            ),
+            stage(
+                "draw.raster",
+                self.renders.iter().map(|r| r.raster.raster).collect(),
+            ),
+            stage(
+                "draw.write_back",
+                self.renders.iter().map(|r| r.raster.write_back).collect(),
             ),
         ];
         if !self.gpu.is_empty() {

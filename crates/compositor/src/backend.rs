@@ -238,10 +238,13 @@ impl State {
             glass: compositor_render::glass::take_times(),
             ..Default::default()
         };
+        // The glass's offscreen draws are its own stages: from here on, the frame's.
+        let _ = compositor_raster::take_times();
         let drawn = match draw_headless(renderer, frames, &self.output, &elements, clear) {
             Ok(Some((draw, submit))) => {
                 stages.draw = draw;
                 stages.submit = submit;
+                stages.raster = compositor_raster::take_times();
                 self.perf.rendered(stages);
                 true
             }
