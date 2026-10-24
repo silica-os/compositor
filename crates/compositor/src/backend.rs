@@ -490,10 +490,10 @@ pub fn shrink(pixels: &[u8], w: u32, h: u32, max: u32) -> Option<(u32, u32, Vec<
     Some((tw, th, out))
 }
 
-/// The renderer runs on the CPU: ours, or GLES on a software rasterizer
-/// (EGL_MESA_device_software).
-fn is_software(renderer: &SilicaRenderer) -> bool {
-    renderer.as_gles().is_none_or(|renderer| {
+/// The renderer is GLES on a software rasterizer (EGL_MESA_device_software). Not ours: the CPU
+/// renderer draws the full glass within the frame budget.
+pub(crate) fn is_software(renderer: &SilicaRenderer) -> bool {
+    renderer.as_gles().is_some_and(|renderer| {
         smithay::backend::egl::EGLDevice::device_for_display(renderer.egl_context().display())
             .is_ok_and(|device| device.is_software())
     })

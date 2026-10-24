@@ -600,7 +600,7 @@ pub fn init_drm(
         output,
         Backend::Drm(Box::new(backend)),
     )?;
-    state.software_renderer = software;
+    state.software_renderer = crate::backend::is_software(state.backend.renderer());
     state.apply_system_keymap();
     // The other displays already connected.
     state.drm_changed_inner();

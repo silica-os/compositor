@@ -262,8 +262,8 @@ pub struct State {
     pub minimize_effect: crate::render::MinimizeEffect,
     /// Chosen glass quality (`--glass`, `ui.glass_quality`).
     pub glass_setting: GlassSetting,
-    /// The renderer runs on a software rasterizer (llvmpipe): the automatic glass is
-    /// frosted.
+    /// The renderer is GLES on a software rasterizer (llvmpipe): the automatic glass is
+    /// frosted. The CPU renderer gets the full glass.
     pub software_renderer: bool,
 }
 
