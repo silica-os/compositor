@@ -97,7 +97,7 @@ pub struct DrmBackend {
     /// The `dev_t` of the GPU, to recognise its udev events.
     device_id: u64,
     /// The GPU's render node: client buffers from it can be scanned out directly.
-    render_node: Option<DrmNode>,
+    pub render_node: Option<DrmNode>,
     fences: FenceWaiter,
     libinput: Libinput,
     /// The pointer devices, to apply the `input.*` settings again when it changes.
@@ -420,7 +420,9 @@ fn render_surface(
     }
     // A frame that fails leaves the screen behind the scene the tracker saw.
     surface.redraw = true;
-    let mut flags = FrameFlags::DEFAULT;
+    // A full-screen client's buffer may differ from the swapchain in alpha only (XRGB against
+    // ARGB): the test commit decides whether the plane takes it.
+    let mut flags = FrameFlags::DEFAULT | FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY;
     if surface.underlays
         && elements.iter().any(|element| {
             matches!(element, crate::render::OutputElement::Glass(glass) if glass.blurs_in_frame())

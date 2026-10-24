@@ -78,6 +78,12 @@ impl DmabufHandler for State {
             backend => backend.renderer().import_dmabuf(&dmabuf, None).is_ok(),
         };
         if imported {
+            // The display's GPU took it: Smithay offers a client buffer to the planes (direct
+            // scanout) only when it carries that GPU's node.
+            #[cfg(feature = "drm")]
+            if let Backend::Drm(drm) = &self.backend {
+                dmabuf.set_node(drm.render_node);
+            }
             // If the client is already gone there is nobody to notify.
             let _ = notifier.successful::<State>();
         } else {
