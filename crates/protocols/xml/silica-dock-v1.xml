@@ -31,7 +31,7 @@
       any layer surface. Nodes the Dock hides do not take pointer or keyboard focus.
   </description>
 
-  <interface name="silica_dock_manager_v1" version="1">
+  <interface name="silica_dock_manager_v1" version="2">
     <description summary="gives the Dock its control"/>
 
     <request name="destroy" type="destructor">
@@ -53,7 +53,7 @@
     </request>
   </interface>
 
-  <interface name="silica_dock_control_v1" version="1">
+  <interface name="silica_dock_control_v1" version="2">
     <description summary="what the Dock sees and decides"/>
 
     <request name="destroy" type="destructor">
@@ -63,6 +63,7 @@
     <enum name="kind">
       <entry name="window" value="0" summary="a toplevel: key is its ext-foreign-toplevel identifier"/>
       <entry name="layer" value="1" summary="a layer surface: key is its namespace"/>
+      <entry name="menu_bar" value="2" since="2" summary="the menu bar strip, while an app shows in it: key is menu-bar; its placement 0 moves and fades it (scale and clip do not apply)"/>
     </enum>
 
     <event name="node">
@@ -159,7 +160,7 @@
     </event>
   </interface>
 
-  <interface name="silica_dock_node_v1" version="1">
+  <interface name="silica_dock_node_v1" version="2">
     <description summary="a window or a layer surface the Dock can place"/>
 
     <request name="destroy" type="destructor">

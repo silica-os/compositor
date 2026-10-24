@@ -166,6 +166,7 @@ impl State {
             window_veil: self.window_veil_view(),
             lock_surfaces,
             menu_bar: self.menu_bar_view(),
+            menu_bar_opacity: self.menu_bar_opacity(),
             dock_shown: self.dock_shown(),
         }
     }

@@ -24,7 +24,7 @@ use tracing::debug;
 use crate::state::State;
 
 /// The version of `silica_dock_manager_v1` the compositor offers.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Most placements one node can have.
 const MAX_PLACEMENTS: usize = 8;
@@ -103,6 +103,8 @@ pub struct Applied {
 pub enum Target {
     Window(Window),
     Layer(LayerSurface),
+    /// The menu bar strip (version 2): the Dock fades it and moves it with a space.
+    MenuBar,
 }
 
 /// What was last sent about a node.
@@ -187,6 +189,46 @@ pub struct DockControl {
 }
 
 impl DockControl {
+    /// What the Dock applied to the layer surface `surface`, if it is one of its nodes.
+    pub fn layer_applied(
+        &self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) -> Option<&Applied> {
+        self.bound
+            .iter()
+            .flat_map(|b| b.nodes.iter())
+            .find(|n| matches!(&n.target, Target::Layer(l) if l.wl_surface() == surface))
+            .map(|n| &n.applied)
+    }
+
+    /// What the Dock applied to the menu bar strip.
+    pub fn menu_bar_applied(&self) -> Option<&Applied> {
+        self.bound
+            .iter()
+            .flat_map(|b| b.nodes.iter())
+            .find(|n| n.target == Target::MenuBar)
+            .map(|n| &n.applied)
+    }
+
+    /// The layer surfaces placed above the Top layer, with each placement, in node order.
+    pub fn layer_places_above_top(&self) -> Vec<(LayerSurface, Placement)> {
+        self.bound
+            .iter()
+            .flat_map(|b| b.nodes.iter())
+            .filter(|n| n.applied.visibility != Visibility::Hidden)
+            .filter_map(|n| match &n.target {
+                Target::Layer(l) => Some((l, &n.applied.places)),
+                _ => None,
+            })
+            .flat_map(|(l, places)| {
+                places
+                    .iter()
+                    .filter(|p| p.above_top)
+                    .map(move |p| (l.clone(), *p))
+            })
+            .collect()
+    }
+
     /// Whether a Dock holds the control.
     pub fn is_bound(&self) -> bool {
         self.bound.as_ref().is_some_and(|b| b.resource.is_alive())
@@ -314,6 +356,10 @@ impl State {
                         frame: layer_map_for_output(&self.output).layer_geometry(l),
                         state: 0,
                     }),
+                    Target::MenuBar => self.menu_bar_frame().map(|frame| Seen {
+                        frame: Some(frame),
+                        state: 0,
+                    }),
                 };
                 seen.push((node.id, current));
             }
@@ -334,6 +380,12 @@ impl State {
                 {
                     announce.push(Target::Layer(layer.clone()));
                 }
+            }
+            if bound.resource.version() >= 2
+                && self.menu_bar_frame().is_some()
+                && !bound.nodes.iter().any(|n| n.target == Target::MenuBar)
+            {
+                announce.push(Target::MenuBar);
             }
         }
         let mut changed = false;
@@ -401,6 +453,7 @@ impl State {
                 layer_map_for_output(&self.output).layer_geometry(l),
                 0,
             ),
+            Target::MenuBar => (2u32, "menu-bar".to_owned(), self.menu_bar_frame(), 0),
         };
         let dh = self.display_handle.clone();
         let Some(bound) = self.dock.bound.as_mut() else {
@@ -420,10 +473,10 @@ impl State {
         };
         bound.resource.node(
             &resource,
-            if kind == 0 {
-                silica_dock_control_v1::Kind::Window
-            } else {
-                silica_dock_control_v1::Kind::Layer
+            match kind {
+                0 => silica_dock_control_v1::Kind::Window,
+                1 => silica_dock_control_v1::Kind::Layer,
+                _ => silica_dock_control_v1::Kind::MenuBar,
             },
             key,
         );
@@ -711,7 +764,7 @@ impl State {
             .filter(|n| n.applied.warp.is_some())
             .filter_map(|n| match &n.target {
                 Target::Window(w) => Some(w.clone()),
-                Target::Layer(_) => None,
+                _ => None,
             })
             .collect();
         for window in &warped {

@@ -18,7 +18,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
 use common::client::TestWindow;
-use common::{Headless, pixel_in, screenshot};
+use common::{Headless, WIDTH, pixel_in, screenshot};
 use serde_json::{Value, json};
 use silica_control::commands::{INPUT_GESTURE, INPUT_POINTER_MOVE, WINDOW_LIST, WindowInfo};
 use silica_protocols::dock::client::silica_dock_control_v1::{
@@ -64,7 +64,7 @@ impl Dispatch<WlRegistry, ()> for Dock {
         } = event
             && interface == "silica_dock_manager_v1"
         {
-            state.manager = Some(registry.bind(name, 1, qh, ()));
+            state.manager = Some(registry.bind(name, 2, qh, ()));
         }
     }
 }
@@ -95,6 +95,7 @@ impl Dispatch<SilicaDockControlV1, ()> for Dock {
                 let index = state.nodes.len();
                 let kind = match kind {
                     WEnum::Value(silica_dock_control_v1::Kind::Window) => "window",
+                    WEnum::Value(silica_dock_control_v1::Kind::MenuBar) => "menu_bar",
                     _ => "layer",
                 };
                 state.out.push(format!("NODE {index} {kind} {key}"));
@@ -686,4 +687,66 @@ fn a_placement_fades_and_is_clipped() {
         outside[0] < 90 && outside[1] > 150,
         "outside the clip: {outside:?}"
     );
+}
+
+fn node_of(lines: &[String], kind: &str) -> String {
+    lines
+        .iter()
+        .find(|l| l.starts_with("NODE") && l.contains(kind))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn the_dock_hides_and_places_a_layer() {
+    // A green desktop and a red 100 × 60 wallpaper layer at the top left corner.
+    let compositor = Headless::start_with("dock-layer", (640, 400), &["--background", "00ff00"]);
+    let _wallpaper = TestWindow::open_layer_at(
+        &compositor.wayland,
+        Layer::Bottom,
+        "wallpaper",
+        Anchor::Top | Anchor::Left,
+        (100, 60),
+        None,
+        |_, _, _, _| [0, 0, 255, 255],
+    );
+    let mut dock = DockProcess::start(&compositor.wayland, true);
+    let node = node_of(&dock.run("bind"), "layer wallpaper");
+    let red = |shot: &[u8], x, y| {
+        let p = pixel_in(shot, 640, x, y);
+        p[0] > 150 && p[1] < 90
+    };
+    assert!(red(&screenshot(&compositor), 50, 30), "the layer is drawn");
+    dock.run(&format!("hide {node}"));
+    dock.run("commit");
+    assert!(!red(&screenshot(&compositor), 50, 30), "hidden by the Dock");
+    dock.run(&format!("inherit {node}"));
+    dock.run("commit");
+    assert!(red(&screenshot(&compositor), 50, 30), "back");
+    dock.run(&format!("place {node} 0 200 100 1"));
+    dock.run("commit");
+    let shot = screenshot(&compositor);
+    assert!(!red(&shot, 50, 30), "it left its place");
+    assert!(red(&shot, 250, 130), "it is drawn at the placement");
+}
+
+#[test]
+fn the_dock_hides_the_menu_bar() {
+    let compositor = Headless::start("dock-menu-bar");
+    let mut app = TestWindow::open(&compositor.wayland, "app");
+    app.add_to_menu_bar(None, 100, [0xff, 0, 0, 0xff]);
+    let blue = |shot: &[u8]| {
+        let p = pixel_in(shot, WIDTH, 50, 16);
+        p[2] > 150 && p[0] < 90
+    };
+    assert!(blue(&screenshot(&compositor)), "the titles are drawn");
+    let mut dock = DockProcess::start(&compositor.wayland, true);
+    let node = node_of(&dock.run("bind"), "menu_bar menu-bar");
+    dock.run(&format!("hide {node}"));
+    dock.run("commit");
+    assert!(!blue(&screenshot(&compositor)), "the strip is hidden");
+    dock.run(&format!("inherit {node}"));
+    dock.run("commit");
+    assert!(blue(&screenshot(&compositor)), "and back");
 }

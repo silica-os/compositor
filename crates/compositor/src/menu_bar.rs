@@ -24,7 +24,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
-use smithay::utils::{Logical, Point, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 use smithay::wayland::compositor;
 use smithay::wayland::shell::xdg::XdgPopupSurfaceData;
 use tracing::warn;
@@ -182,7 +182,43 @@ impl State {
         if !self.menu_bar_visible() {
             return Vec::new();
         }
-        self.menu_bar.layout(self.output_width()).surfaces
+        let surfaces = self.menu_bar.layout(self.output_width()).surfaces;
+        // The Dock hides the strip or moves it with a space (silica-os/compositor#15).
+        let applied = self.dock.menu_bar_applied();
+        if applied.is_some_and(|a| a.visibility == crate::dock_control::Visibility::Hidden) {
+            return Vec::new();
+        }
+        let shift = applied
+            .and_then(|a| a.places.first())
+            .zip(self.menu_bar_frame())
+            .map(|(p, frame)| {
+                Point::from((
+                    (p.x - f64::from(frame.loc.x)).round() as i32,
+                    (p.y - f64::from(frame.loc.y)).round() as i32,
+                ))
+            })
+            .unwrap_or_default();
+        surfaces
+            .into_iter()
+            .map(|(surface, at)| (surface, at + shift))
+            .collect()
+    }
+
+    /// How opaque the strip is: the Dock fades it while Panorama opens.
+    pub fn menu_bar_opacity(&self) -> f32 {
+        self.dock
+            .menu_bar_applied()
+            .and_then(|a| a.places.first())
+            .map_or(1.0, |p| p.opacity as f32)
+    }
+
+    /// The strip's frame in the desktop while an app shows in it (the Dock's `menu-bar` node).
+    pub fn menu_bar_frame(&self) -> Option<Rectangle<i32, Logical>> {
+        if !self.menu_bar.active() {
+            return None;
+        }
+        let origin = self.space.output_geometry(&self.output)?.loc;
+        Some(Rectangle::new(origin, (self.output_width(), HEIGHT).into()))
     }
 
     /// Where a surface of the strip is in the output.

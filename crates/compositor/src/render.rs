@@ -41,6 +41,8 @@ use crate::glass::{Shape, current_regions};
 render_elements! {
     pub OutputElement<=SilicaRenderer>;
     Surface=WaylandSurfaceRenderElement<SilicaRenderer>,
+    /// A layer surface the Dock placed at another scale (a wallpaper in a space thumbnail).
+    ScaledSurface=RescaleRenderElement<WaylandSurfaceRenderElement<SilicaRenderer>>,
     Rounded=RoundedSurface,
     /// Pixel-shader elements of the window: title bar and shadow.
     Shader=RescaleRenderElement<ShaderElement>,
@@ -88,6 +90,8 @@ pub struct RenderContext<'a> {
     /// The menu bar's surfaces and where they are in the output (#12); empty while the strip
     /// is not on screen.
     pub menu_bar: Vec<(WlSurface, Point<i32, Logical>)>,
+    /// How opaque the menu bar is (the Dock fades it).
+    pub menu_bar_opacity: f32,
     /// How much of the Dock shows (`dock_reveal.rs`): over a full-screen window it steps
     /// aside (0) and slides in from the bottom edge.
     pub dock_shown: f32,
@@ -826,6 +830,46 @@ fn placed_elements(
         ButtonsLook::default(),
         dark,
     );
+    faded_and_clipped(renderer, elements, place, output_origin, output_size, scale)
+}
+
+/// A layer surface where the Dock placed it (silica-os/compositor#15): the wallpaper sliding
+/// with its space or drawn small in a space thumbnail. `place` puts the layer's top-left corner.
+fn placed_layer_elements(
+    renderer: &mut SilicaRenderer,
+    layer: &LayerSurface,
+    place: &crate::dock_control::Placement,
+    output_origin: Point<i32, Logical>,
+    output_size: Size<i32, Physical>,
+    scale: f64,
+) -> Vec<OutputElement> {
+    let target = Point::<f64, Logical>::from((place.x, place.y)) - output_origin.to_f64();
+    let location = target.to_physical_precise_round(scale);
+    let elements = AsRenderElements::<SilicaRenderer>::render_elements::<
+        WaylandSurfaceRenderElement<SilicaRenderer>,
+    >(layer, renderer, location, scale.into(), 1.0)
+    .into_iter()
+    .map(|element| {
+        OutputElement::ScaledSurface(RescaleRenderElement::from_element(
+            element,
+            location,
+            place.scale,
+        ))
+    })
+    .collect();
+    faded_and_clipped(renderer, elements, place, output_origin, output_size, scale)
+}
+
+/// `elements` faded to the placement's opacity and cut to its clip: drawn into a texture of
+/// their own first when either applies.
+fn faded_and_clipped(
+    renderer: &mut SilicaRenderer,
+    elements: Vec<OutputElement>,
+    place: &crate::dock_control::Placement,
+    output_origin: Point<i32, Logical>,
+    output_size: Size<i32, Physical>,
+    scale: f64,
+) -> Vec<OutputElement> {
     if place.opacity >= 0.999 && place.clip.is_none() {
         return elements;
     }
@@ -867,7 +911,7 @@ fn placed_elements(
             ))]
         }
         Err(err) => {
-            warn!("placed window skipped in this frame: {err:?}");
+            warn!("placed node skipped in this frame: {err:?}");
             Vec::new()
         }
     }
@@ -921,6 +965,26 @@ pub fn output_elements(
         for layer in layer_map.layers_on(level).rev() {
             let dock = crate::layers::is_dock(layer);
             if dock && context.dock_shown <= 0.0 {
+                continue;
+            }
+            // The Dock hides a layer (another space) or draws it where it places it.
+            let applied = context
+                .dock
+                .and_then(|d| d.layer_applied(layer.wl_surface()));
+            if applied.is_some_and(|a| a.visibility == crate::dock_control::Visibility::Hidden) {
+                continue;
+            }
+            if let Some(applied) = applied.filter(|a| !a.places.is_empty()) {
+                for place in applied.places.iter().filter(|p| !p.above_top) {
+                    elements.extend(placed_layer_elements(
+                        renderer,
+                        layer,
+                        place,
+                        output_origin,
+                        output_size,
+                        scale,
+                    ));
+                }
                 continue;
             }
             // Not before its first frame at the configured size (the Dock in the middle of
@@ -1015,7 +1079,7 @@ pub fn output_elements(
                 surface,
                 location,
                 scale,
-                1.0,
+                context.menu_bar_opacity,
                 Kind::Unspecified,
             )
             .into_iter()
@@ -1055,6 +1119,21 @@ pub fn output_elements(
                 context.dark,
             ));
         }
+    }
+    // Layers the Dock places above the Top layer: the wallpaper in the space thumbnails.
+    for (layer, place) in context
+        .dock
+        .map(|d| d.layer_places_above_top())
+        .unwrap_or_default()
+    {
+        elements.extend(placed_layer_elements(
+            renderer,
+            &layer,
+            &place,
+            output_origin,
+            output_size,
+            scale,
+        ));
     }
     let top_start = elements.len();
     push_layers(&mut elements, &mut anchors, renderer, Layer::Top);

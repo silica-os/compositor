@@ -370,6 +370,14 @@ impl State {
                 if dock_hidden && is_dock(layer) {
                     return None;
                 }
+                // A layer the Dock hid (another space) takes no input.
+                let hidden = self
+                    .dock
+                    .layer_applied(layer.wl_surface())
+                    .is_some_and(|a| a.visibility == crate::dock_control::Visibility::Hidden);
+                if hidden {
+                    return None;
+                }
                 let drawn = drawn_layer(&map, layer, output.size)?;
                 let local = pos - (drawn.loc + origin).to_f64();
                 layer
