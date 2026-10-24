@@ -204,12 +204,44 @@ impl State {
             .collect()
     }
 
-    /// How opaque the strip is: the Dock fades it while Panorama opens.
-    pub fn menu_bar_opacity(&self) -> f32 {
-        self.dock
-            .menu_bar_applied()
-            .and_then(|a| a.places.first())
-            .map_or(1.0, |p| p.opacity as f32)
+    /// What the renderer draws of the strip: its surfaces at each of the Dock's placements
+    /// (two at once while a space slides), with their opacity (the Dock fades it while
+    /// Panorama opens).
+    pub fn menu_bar_draws(&self) -> Vec<(WlSurface, Point<i32, Logical>, f32)> {
+        if !self.menu_bar_visible() {
+            return Vec::new();
+        }
+        let applied = self.dock.menu_bar_applied();
+        if applied.is_some_and(|a| a.visibility == crate::dock_control::Visibility::Hidden) {
+            return Vec::new();
+        }
+        let mut places: Vec<(Point<i32, Logical>, f32)> = applied
+            .zip(self.menu_bar_frame())
+            .map(|(a, frame)| {
+                a.places
+                    .iter()
+                    .map(|p| {
+                        let shift = Point::from((
+                            (p.x - f64::from(frame.loc.x)).round() as i32,
+                            (p.y - f64::from(frame.loc.y)).round() as i32,
+                        ));
+                        (shift, p.opacity as f32)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if places.is_empty() {
+            places.push((Point::default(), 1.0));
+        }
+        let surfaces = self.menu_bar.layout(self.output_width()).surfaces;
+        places
+            .iter()
+            .flat_map(|(shift, opacity)| {
+                surfaces
+                    .iter()
+                    .map(move |(surface, at)| (surface.clone(), *at + *shift, *opacity))
+            })
+            .collect()
     }
 
     /// The strip's frame in the desktop while an app shows in it (the Dock's `menu-bar` node).

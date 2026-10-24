@@ -1420,8 +1420,7 @@ impl State {
             _ => None,
         };
         let lock_surfaces = self.lock_wl_surfaces();
-        let menu_bar = self.menu_bar_view();
-        let menu_bar_opacity = self.menu_bar_opacity();
+        let menu_bar = self.menu_bar_draws();
         let dock_shown = self.dock_shown();
         let accessibility = self.accessibility;
         let Backend::Drm(backend) = &mut self.backend else {
@@ -1451,7 +1450,6 @@ impl State {
             window_veil,
             lock_surfaces,
             menu_bar,
-            menu_bar_opacity,
             dock_shown,
         };
         if let (Some(timer), Some(gles)) = (&mut backend.gpu_timer, backend.renderer.gles()) {

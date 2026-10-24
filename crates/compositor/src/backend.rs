@@ -165,8 +165,7 @@ impl State {
             drag_icon: self.drag_icon_view(),
             window_veil: self.window_veil_view(),
             lock_surfaces,
-            menu_bar: self.menu_bar_view(),
-            menu_bar_opacity: self.menu_bar_opacity(),
+            menu_bar: self.menu_bar_draws(),
             dock_shown: self.dock_shown(),
         }
     }

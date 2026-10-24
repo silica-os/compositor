@@ -87,11 +87,9 @@ pub struct RenderContext<'a> {
     pub window_veil: Option<Rectangle<i32, Logical>>,
     /// The session is locked: only these lock surfaces are drawn (none: the plain screen).
     pub lock_surfaces: Option<Vec<WlSurface>>,
-    /// The menu bar's surfaces and where they are in the output (#12); empty while the strip
-    /// is not on screen.
-    pub menu_bar: Vec<(WlSurface, Point<i32, Logical>)>,
-    /// How opaque the menu bar is (the Dock fades it).
-    pub menu_bar_opacity: f32,
+    /// The menu bar's surfaces, where they are in the output (#12) and how opaque (the Dock
+    /// fades and moves it, compositor#15); empty while the strip is not on screen.
+    pub menu_bar: Vec<(WlSurface, Point<i32, Logical>, f32)>,
     /// How much of the Dock shows (`dock_reveal.rs`): over a full-screen window it steps
     /// aside (0) and slides in from the bottom edge.
     pub dock_shown: f32,
@@ -1058,7 +1056,13 @@ pub fn output_elements(
     }
     // The menu bar (#12) over the Dock: first the menus hanging from it, each with the glass
     // it declares behind it, then its surfaces.
-    for (surface, at) in &context.menu_bar {
+    // Its menus hang from the first placement only.
+    let mut seen: Vec<&WlSurface> = Vec::new();
+    for (surface, at, _) in &context.menu_bar {
+        if seen.contains(&surface) {
+            continue;
+        }
+        seen.push(surface);
         let location = at.to_f64().to_physical_precise_round(scale);
         for popup in surface_popup_layers(renderer, surface, Point::default(), location, scale) {
             elements.extend(popup.elements);
@@ -1071,7 +1075,7 @@ pub fn output_elements(
             });
         }
     }
-    for (surface, at) in &context.menu_bar {
+    for (surface, at, opacity) in &context.menu_bar {
         let location: Point<i32, Physical> = at.to_f64().to_physical_precise_round(scale);
         elements.extend(
             render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
@@ -1079,7 +1083,7 @@ pub fn output_elements(
                 surface,
                 location,
                 scale,
-                context.menu_bar_opacity,
+                *opacity,
                 Kind::Unspecified,
             )
             .into_iter()

@@ -736,10 +736,11 @@ fn the_dock_hides_the_menu_bar() {
     let compositor = Headless::start("dock-menu-bar");
     let mut app = TestWindow::open(&compositor.wayland, "app");
     app.add_to_menu_bar(None, 100, [0xff, 0, 0, 0xff]);
-    let blue = |shot: &[u8]| {
-        let p = pixel_in(shot, WIDTH, 50, 16);
+    let blue_at = |shot: &[u8], y| {
+        let p = pixel_in(shot, WIDTH, 50, y);
         p[2] > 150 && p[0] < 90
     };
+    let blue = |shot: &[u8]| blue_at(shot, 16);
     assert!(blue(&screenshot(&compositor)), "the titles are drawn");
     let mut dock = DockProcess::start(&compositor.wayland, true);
     let node = node_of(&dock.run("bind"), "menu_bar menu-bar");
@@ -749,4 +750,13 @@ fn the_dock_hides_the_menu_bar() {
     dock.run(&format!("inherit {node}"));
     dock.run("commit");
     assert!(blue(&screenshot(&compositor)), "and back");
+    // Moving with a space: drawn at each placement.
+    dock.run(&format!("place {node} 0 0 100 1"));
+    dock.run("commit");
+    let shot = screenshot(&compositor);
+    assert!(!blue(&shot) && blue_at(&shot, 116), "moved down");
+    dock.run(&format!("place {node} 1 0 0 1"));
+    dock.run("commit");
+    let shot = screenshot(&compositor);
+    assert!(blue(&shot) && blue_at(&shot, 116), "at both placements");
 }
