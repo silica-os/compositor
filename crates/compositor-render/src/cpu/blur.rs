@@ -11,28 +11,32 @@ use compositor_raster::{CpuRenderer, Image, Walk};
 use super::{pack, unpack};
 use crate::glass::{BlurEdge, effective_factor, reduced_sigma};
 
-/// Premultiplied RGBA in 0–1, `w` × `h`, four channels per pixel.
+/// Premultiplied RGBA in 0–1, rows `y0..` of an image `w` × `h`, four channels per pixel: the
+/// rows a pass made.
+#[derive(Default)]
 struct Plane {
     w: usize,
     h: usize,
+    y0: usize,
     px: Vec<f32>,
 }
 
 impl Plane {
-    fn new(w: usize, h: usize) -> Self {
-        Self {
-            w,
-            h,
-            px: vec![0.0; w.saturating_mul(h).saturating_mul(4)],
-        }
+    /// Room for `rows` of a `w` × `h` image. What the buffer held stays until written over.
+    fn reset(&mut self, (w, h): (usize, usize), rows: &Range<usize>) {
+        (self.w, self.h, self.y0) = (w, h, rows.start);
+        self.px
+            .resize(w.saturating_mul(rows.len()).saturating_mul(4), 0.0);
     }
 
-    /// Row `y`, clamped into the plane: the edge repeated.
+    /// Row `y`, clamped into the image (the edge repeated); empty if the plane lacks it.
     fn row(&self, y: isize) -> &[f32] {
         let Some(last) = self.h.checked_sub(1) else {
             return &[];
         };
-        let y = y.clamp(0, last as isize) as usize;
+        let Some(y) = (y.clamp(0, last as isize) as usize).checked_sub(self.y0) else {
+            return &[];
+        };
         let n = self.w * 4;
         self.px.get(y * n..(y + 1) * n).unwrap_or_default()
     }
@@ -41,9 +45,20 @@ impl Plane {
 thread_local! {
     /// A row of channels, per thread.
     static SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+    /// A row of source pixels summed, per thread.
+    static SUM: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
     /// A row of the blurred texture upsampled, per thread.
     static UPSAMPLED: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// The pass along x and the blurred texture, kept from one blur to the next on the thread
+    /// that asks for them: a frame neither allocates nor clears them.
+    static ACROSS: RefCell<Plane> = RefCell::default();
+    static BLURRED: RefCell<Image> = RefCell::default();
 }
+
+/// Channels `convolve` makes at once, in registers.
+const LANES: usize = 32;
+/// The taps on each side `convolve` looks up once per row: a σ of 32 texels.
+const MAX_TAPS: usize = 96;
 
 /// Pixel `x` of a row of channels.
 #[inline]
@@ -74,13 +89,50 @@ fn convolve<'a>(
 ) {
     let reach = weights.len() / 2;
     let centre = weights.get(reach).copied().unwrap_or(1.0);
-    for (o, c) in out.iter_mut().zip(taps(0).0) {
-        *o = c * centre;
+    let side = weights.get(reach + 1..).unwrap_or_default();
+    // The rows of every tap, looked up once.
+    let mut pairs: [(&[f32], &[f32]); MAX_TAPS] = [(&[], &[]); MAX_TAPS];
+    for (k, pair) in pairs.iter_mut().take(side.len()).enumerate() {
+        *pair = taps(k + 1);
     }
-    for (k, weight) in weights.iter().skip(reach + 1).enumerate() {
-        let (a, b) = taps(k + 1);
-        for ((o, a), b) in out.iter_mut().zip(a).zip(b) {
-            *o += weight * (a + b);
+    let (centre_row, pairs) = (taps(0).0, pairs.get(..side.len()).unwrap_or_default());
+    if pairs.len() < side.len() {
+        // Wider than the table: one tap at a time over the whole row.
+        for (o, c) in out.iter_mut().zip(centre_row) {
+            *o = c * centre;
+        }
+        for (k, weight) in side.iter().enumerate() {
+            let (a, b) = taps(k + 1);
+            for ((o, a), b) in out.iter_mut().zip(a).zip(b) {
+                *o += weight * (a + b);
+            }
+        }
+    } else {
+        // `LANES` channels at a time through every tap, their sums kept in registers.
+        let (chunks, rest) = out.as_chunks_mut::<LANES>();
+        for (n, o) in chunks.iter_mut().enumerate() {
+            let i = n * LANES;
+            let lanes = |s: &[f32]| {
+                s.get(i..)
+                    .and_then(|s| s.first_chunk::<LANES>())
+                    .copied()
+                    .unwrap_or([0.0; LANES])
+            };
+            let mut sum = lanes(centre_row).map(|c| c * centre);
+            for (weight, (a, b)) in side.iter().zip(pairs) {
+                for ((s, a), b) in sum.iter_mut().zip(lanes(a)).zip(lanes(b)) {
+                    *s += weight * (a + b);
+                }
+            }
+            *o = sum;
+        }
+        let done = chunks.len() * LANES;
+        for (i, o) in rest.iter_mut().enumerate() {
+            let at = |s: &[f32]| s.get(done + i).copied().unwrap_or(0.0);
+            *o = at(centre_row) * centre;
+            for (weight, (a, b)) in side.iter().zip(pairs) {
+                *o += weight * (at(a) + at(b));
+            }
         }
     }
     if quantize {
@@ -102,25 +154,27 @@ fn convolve_row<'a, S: Simd>(
     convolve(out, weights, quantize, taps);
 }
 
-/// One pass of `blur.frag` along x over rows of `w` pixels, the edge repeated; `load` writes
-/// source row `y` into the channels it is given. Only `rows` are made; the others stay 0.
+/// One pass of `blur.frag` along x over rows of `w` pixels, the edge repeated, into `out`;
+/// `load` writes source row `y` into the channels it is given. Only `rows` are made.
+#[allow(clippy::too_many_arguments)]
 fn across(
     renderer: &CpuRenderer,
+    out: &mut Plane,
     (w, h): (usize, usize),
     weights: &[f32],
     quantize: bool,
     rows: Range<usize>,
     load: impl Fn(usize, &mut [f32]) + Sync,
-) -> Plane {
-    let mut out = Plane::new(w, h);
+) {
+    out.reset((w, h), &rows);
     if w == 0 || h == 0 {
-        return out;
+        return;
     }
     let reach = weights.len() / 2;
     let level = renderer.level();
-    let band = out.px.get_mut(rows.start * w * 4..rows.end * w * 4);
-    renderer.rows_costly(band.unwrap_or_default(), w * 4, |y, out| {
-        let y = y + rows.start;
+    let y0 = rows.start;
+    renderer.rows_costly(&mut out.px, w * 4, |y, out| {
+        let y = y + y0;
         SCRATCH.with_borrow_mut(|line| {
             line.clear();
             line.resize((w + 2 * reach) * 4, 0.0);
@@ -145,21 +199,23 @@ fn across(
             dispatch!(level, simd => convolve_row(simd, out, weights, quantize, taps));
         });
     });
-    out
 }
 
-/// One pass of `blur.frag` along y, the edge repeated, into 8 bits per channel. Only `rows`
-/// are made; the others stay transparent.
+/// One pass of `blur.frag` along y, the edge repeated, into `out` at 8 bits per channel. Only
+/// `rows` are made; the others keep what they held.
 fn down(
     renderer: &CpuRenderer,
     src: &Plane,
+    out: &mut Image,
     weights: &[f32],
     quantize: bool,
     rows: Range<usize>,
-) -> Image {
-    let mut out = Image::new(src.w, src.h);
+) {
+    if (out.width(), out.height()) != (src.w, src.h) {
+        *out = Image::new(src.w, src.h);
+    }
     if src.w == 0 || src.h == 0 {
-        return out;
+        return;
     }
     let level = renderer.level();
     let band = out
@@ -174,7 +230,6 @@ fn down(
             dispatch!(level, simd => down_row(simd, out, line, weights, quantize, taps));
         });
     });
-    out
 }
 
 /// One row of `down`, compiled for the SIMD level of `S`.
@@ -203,25 +258,23 @@ fn inside(p: f32, size: f32, mirror: bool) -> usize {
     p.clamp(0.5, size - 0.5).floor() as usize
 }
 
-/// `downsample.frag`: the box mean of `factor` × `factor` source pixels per output pixel,
-/// with a border of `pad` output pixels holding the source extended past its edge. Only `rows`
-/// are made; the others stay 0.
-fn downsample(
+/// `downsample.frag` as the rows `across` loads: row `y` of the box mean of `factor` ×
+/// `factor` source pixels per output pixel, `width` of them, with a border of `pad` output
+/// pixels holding the source extended past its edge.
+fn downsampler<'a>(
     renderer: &CpuRenderer,
-    src: &Image,
-    (small, factor, pad): ((usize, usize), usize, usize),
+    src: &'a Image,
+    (width, factor, pad): (usize, usize, usize),
     mirror: bool,
-    rows: Range<usize>,
-) -> Plane {
-    let mut out = Plane::new(small.0, small.1);
+) -> impl Fn(usize, &mut [f32]) + Sync + 'a {
     let (sw, sh) = (src.width(), src.height());
-    if sw == 0 || sh == 0 || small.0 == 0 || factor == 0 {
-        return out;
-    }
+    let factor = factor.max(1);
     let norm = 1.0 / (255 * factor * factor) as f32;
-    let start = |o: usize| (o as f32 - pad as f32) * factor as f32;
-    // The source column of each of the `factor` samples of every output pixel.
-    let columns: Vec<usize> = (0..small.0 * factor)
+    let start = move |o: usize| (o as f32 - pad as f32) * factor as f32;
+    // The source column of each of the `factor` samples of every output pixel; none of an
+    // empty source, which leaves the rows 0.
+    let columns: Vec<usize> = (0..width * factor)
+        .filter(|_| sw > 0 && sh > 0)
         .map(|i| {
             inside(
                 start(i / factor) + (i % factor) as f32 + 0.5,
@@ -232,12 +285,11 @@ fn downsample(
         .collect();
     let pixels = src.pixels();
     let level = renderer.level();
-    let band = out
-        .px
-        .get_mut(rows.start * small.0 * 4..rows.end * small.0 * 4);
-    renderer.rows_costly(band.unwrap_or_default(), small.0 * 4, |y, out| {
-        let y = y + rows.start;
-        SCRATCH.with_borrow_mut(|sum| {
+    move |y, out| {
+        if columns.is_empty() {
+            return;
+        }
+        SUM.with_borrow_mut(|sum| {
             let rows = (0..factor).map(|j| {
                 let sy = inside(start(y) + j as f32 + 0.5, sh as f32, mirror);
                 pixels.get(sy * sw..(sy + 1) * sw).unwrap_or_default()
@@ -245,8 +297,7 @@ fn downsample(
             let columns = (&columns[..], factor, norm);
             dispatch!(level, simd => downsample_row(simd, out, sum, rows, columns));
         });
-    });
-    out
+    }
 }
 
 /// One output row of `downsample` from its `factor` source `rows`, compiled for the SIMD level
@@ -340,26 +391,48 @@ pub(crate) fn blur_area(
     let read = texel(y0).min(size.1 - 1)..(texel(y1 - 1) + 2).min(size.1);
     let reach = weights.len() / 2;
     let near = read.start.saturating_sub(reach)..(read.end + reach).min(size.1);
-    let blurred = if f > 1 {
-        let mirror = edge == BlurEdge::Mirror;
-        let prefiltered = downsample(renderer, sharp, (size, f, pad), mirror, near.clone());
-        let across = across(renderer, size, &weights, false, near, |y, row| {
-            for (o, s) in row.iter_mut().zip(prefiltered.row(y as isize)) {
-                *o = *s;
+    ACROSS.with_borrow_mut(|plane| {
+        BLURRED.with_borrow_mut(|blurred| {
+            if f > 1 {
+                let mirror = edge == BlurEdge::Mirror;
+                let load = downsampler(renderer, sharp, (size.0, f, pad), mirror);
+                across(renderer, plane, size, &weights, false, near, load);
+                down(renderer, plane, blurred, &weights, false, read);
+            } else {
+                across(renderer, plane, size, &weights, true, near, |y, row| {
+                    let line = pixels.get(y * w..(y + 1) * w).unwrap_or_default();
+                    for (o, p) in row.as_chunks_mut::<4>().0.iter_mut().zip(line) {
+                        o.copy_from_slice(&unpack(*p));
+                    }
+                });
+                down(renderer, plane, blurred, &weights, true, read);
             }
+            let area = [x0, y0, x1, y1];
+            mix(
+                renderer,
+                sharp,
+                blurred,
+                &mut out,
+                (offset, step, sharp_share),
+                area,
+            );
         });
-        down(renderer, &across, &weights, false, read)
-    } else {
-        let across = across(renderer, size, &weights, true, near, |y, row| {
-            let line = pixels.get(y * w..(y + 1) * w).unwrap_or_default();
-            for (o, p) in row.as_chunks_mut::<4>().0.iter_mut().zip(line) {
-                o.copy_from_slice(&unpack(*p));
-            }
-        });
-        down(renderer, &across, &weights, true, read)
-    };
-    // The blurred texture upsampled along each row (`upsample.frag`: bilinear, kept inside
-    // the texture, which the sampler's clamp to the edge gives) and drawn over the sharp share.
+    });
+    out
+}
+
+/// The blurred texture upsampled along each row of `area` (`upsample.frag`: bilinear, kept
+/// inside the texture, which the sampler's clamp to the edge gives) and drawn over the sharp
+/// share, into `out`.
+fn mix(
+    renderer: &CpuRenderer,
+    sharp: &Image,
+    blurred: &Image,
+    out: &mut Image,
+    (offset, step, sharp_share): (f64, f64, f32),
+    [x0, y0, x1, y1]: [usize; 4],
+) {
+    let (w, pixels) = (sharp.width(), sharp.pixels());
     let alpha = ((1.0 - sharp_share).clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
     let u = offset + (x0 as f64 + 0.5) * step;
     let kernels = renderer.kernels();
@@ -375,11 +448,10 @@ pub(crate) fn blur_area(
             line.clear();
             line.resize(row.len(), 0);
             let v = offset + (y as f64 + 0.5) * step;
-            kernels.bilinear(&blurred, Walk::new([u, v], [step, 0.0]), line);
+            kernels.bilinear(blurred, Walk::new([u, v], [step, 0.0]), line);
             kernels.over(row, line, alpha);
         });
     });
-    out
 }
 
 #[cfg(test)]
