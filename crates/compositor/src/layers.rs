@@ -82,6 +82,17 @@ pub fn is_dock(layer: &LayerSurface) -> bool {
     layer.namespace() == "dock"
 }
 
+/// How far below its place the Dock's layer is drawn while it slides in or away
+/// (`dock_reveal.rs`), `shown` 0 to 1: by its exclusive zone (the tiles and the gap under
+/// them), else by its height.
+pub fn dock_slide(layer: &LayerSurface, shown: f32) -> i32 {
+    let height = match layer.cached_state().exclusive_zone {
+        ExclusiveZone::Exclusive(zone) if zone > 0 => i32::try_from(zone).unwrap_or(i32::MAX),
+        _ => layer.bbox().size.h,
+    };
+    ((1.0 - shown.clamp(0.0, 1.0)) * height as f32).round() as i32
+}
+
 /// Where and how a layer is drawn on an output of `output` logical size, `None` if it must not
 /// be drawn yet.
 ///
@@ -353,7 +364,7 @@ impl State {
         // The input region counts, not the rectangle: a hidden shell component (a closed
         // Faro) is transparent and full screen but with an empty region. A layer not shown yet
         // takes no input; one resizing takes it where it is drawn.
-        let dock_hidden = self.front_is_fullscreen();
+        let dock_hidden = self.dock_shown() <= 0.0;
         layers.iter().find_map(|level| {
             map.layers_on(*level).rev().find_map(|layer| {
                 if dock_hidden && is_dock(layer) {

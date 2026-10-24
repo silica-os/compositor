@@ -341,3 +341,51 @@ fn a_bottom_layer_that_never_draws_at_its_size_stays_at_the_bottom_with_its_glas
     let list = glass_list(&compositor);
     assert_eq!(list[0]["y"], 150, "{list}");
 }
+
+#[test]
+fn the_dock_slides_in_over_a_full_screen_window_from_the_bottom_edge() {
+    let compositor = start("dock-reveal", SIZE, &[]);
+    let mut dock = Layer::open(&compositor, 50);
+    dock.draw((SIZE.0, 50), BLUE, None);
+    let bottom: Vec<u32> = (150..200).collect();
+    assert_eq!(rows_with(&common::screenshot(&compositor), BLUE), bottom);
+
+    // A full-screen window in front: the Dock steps aside.
+    let mut window = common::client::TestWindow::open(&compositor.wayland, "full");
+    window.request_fullscreen(true);
+    assert!(window.fullscreen());
+    window.commit_frames(1, std::time::Duration::ZERO);
+    let shot = common::screenshot(&compositor);
+    assert_eq!(rows_with(&shot, BLUE), Vec::<u32>::new(), "it steps aside");
+
+    // Against the bottom edge: after the delay it slides in over the window.
+    let mut control = compositor.client();
+    let edge = f64::from(SIZE.1) - 0.5;
+    control
+        .call(
+            "input.pointer_move",
+            serde_json::json!({"x": 100.0, "y": edge}),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    let shot = common::screenshot(&compositor);
+    assert_eq!(
+        rows_with(&shot, BLUE),
+        Vec::<u32>::new(),
+        "not before the delay"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let shot = common::screenshot(&compositor);
+    assert_eq!(rows_with(&shot, BLUE), bottom, "it slid in");
+
+    // Away from it, it slides away again.
+    control
+        .call(
+            "input.pointer_move",
+            serde_json::json!({"x": 100.0, "y": 20.0}),
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let shot = common::screenshot(&compositor);
+    assert_eq!(rows_with(&shot, BLUE), Vec::<u32>::new(), "it slid away");
+}

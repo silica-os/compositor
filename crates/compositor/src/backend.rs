@@ -166,7 +166,7 @@ impl State {
             window_veil: self.window_veil_view(),
             lock_surfaces,
             menu_bar: self.menu_bar_view(),
-            dock_hidden: self.front_is_fullscreen(),
+            dock_shown: self.dock_shown(),
         }
     }
 

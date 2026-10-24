@@ -19,6 +19,7 @@ pub mod display_layout;
 mod displays;
 mod dmabuf;
 mod dock_control;
+mod dock_reveal;
 #[cfg(feature = "drm")]
 mod drm;
 mod egl;

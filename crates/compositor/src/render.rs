@@ -88,8 +88,9 @@ pub struct RenderContext<'a> {
     /// The menu bar's surfaces and where they are in the output (#12); empty while the strip
     /// is not on screen.
     pub menu_bar: Vec<(WlSurface, Point<i32, Logical>)>,
-    /// The front window is full screen: the Dock steps aside, as the menu bar does.
-    pub dock_hidden: bool,
+    /// How much of the Dock shows (`dock_reveal.rs`): over a full-screen window it steps
+    /// aside (0) and slides in from the bottom edge.
+    pub dock_shown: f32,
 }
 
 /// The veil over the window to capture (K-05): `#88bae7` at alpha ~0.51, premultiplied.
@@ -918,7 +919,8 @@ pub fn output_elements(
                        renderer: &mut SilicaRenderer,
                        level| {
         for layer in layer_map.layers_on(level).rev() {
-            if context.dock_hidden && crate::layers::is_dock(layer) {
+            let dock = crate::layers::is_dock(layer);
+            if dock && context.dock_shown <= 0.0 {
                 continue;
             }
             // Not before its first frame at the configured size (the Dock in the middle of
@@ -926,7 +928,11 @@ pub fn output_elements(
             let Some(drawn) = crate::layers::drawn_layer(&layer_map, layer, layers_output) else {
                 continue;
             };
-            let location = drawn.loc.to_f64().to_physical_precise_round(scale);
+            let mut loc = drawn.loc;
+            if dock && context.dock_shown < 1.0 {
+                loc.y += crate::layers::dock_slide(layer, context.dock_shown);
+            }
+            let location = loc.to_f64().to_physical_precise_round(scale);
             // The layer's menus and popovers (silica-os/silica-desktop#222) are in front of it,
             // each with the glass it declares behind it.
             for popup in surface_popup_layers(

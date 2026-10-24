@@ -110,6 +110,8 @@ pub struct State {
     pub dock: crate::dock_control::DockControl,
     /// Windows the Dock took off the screen (another space), with the place they come back to.
     pub dock_hidden: crate::app_hide::HiddenApps,
+    /// The Dock over a full-screen window (`dock_reveal.rs`).
+    pub dock_reveal: crate::dock_reveal::DockReveal,
     /// The shell components bound to `silica_shell_manager_v1`.
     pub shell_managers:
         Vec<silica_protocols::shell::server::silica_shell_manager_v1::SilicaShellManagerV1>,
@@ -322,6 +324,7 @@ impl State {
         }
         if !self.closing.is_empty()
             || !self.genies.is_empty()
+            || self.dock_reveal.animating(Instant::now())
             || self.resizing.is_some()
             || self.resize_settling.is_some()
         {
@@ -482,6 +485,7 @@ impl State {
             dock_manager_state,
             dock: crate::dock_control::DockControl::default(),
             dock_hidden: crate::app_hide::HiddenApps::default(),
+            dock_reveal: crate::dock_reveal::DockReveal::default(),
             shell_managers: Vec::new(),
             transients: Vec::new(),
             transient_press: false,

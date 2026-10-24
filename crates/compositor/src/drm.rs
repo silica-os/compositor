@@ -1421,7 +1421,7 @@ impl State {
         };
         let lock_surfaces = self.lock_wl_surfaces();
         let menu_bar = self.menu_bar_view();
-        let dock_hidden = self.front_is_fullscreen();
+        let dock_shown = self.dock_shown();
         let accessibility = self.accessibility;
         let Backend::Drm(backend) = &mut self.backend else {
             return;
@@ -1450,7 +1450,7 @@ impl State {
             window_veil,
             lock_surfaces,
             menu_bar,
-            dock_hidden,
+            dock_shown,
         };
         if let (Some(timer), Some(gles)) = (&mut backend.gpu_timer, backend.renderer.gles()) {
             timer.begin(gles);
