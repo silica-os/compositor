@@ -53,6 +53,9 @@ pub struct RenderStages {
     pub draw: Duration,
     /// Handing the frame to the display: copies, fences, the page flip.
     pub submit: Duration,
+    /// Waiting for the renderer to finish the frame (the headless backend): the GPU's time,
+    /// not the compositor's, left out of `total`.
+    pub wait: Duration,
     /// The glass's share of `build`.
     pub glass: compositor_render::glass::GlassTimes,
     /// The CPU renderer's share of `draw`: the pixels, and the copy into a dmabuf.
@@ -187,6 +190,7 @@ impl Perf {
             stage("build", self.renders.iter().map(|r| r.build).collect()),
             stage("draw", self.renders.iter().map(|r| r.draw).collect()),
             stage("submit", self.renders.iter().map(|r| r.submit).collect()),
+            stage("wait", self.renders.iter().map(|r| r.wait).collect()),
             stage(
                 "glass.backdrop",
                 self.renders.iter().map(|r| r.glass.backdrop).collect(),

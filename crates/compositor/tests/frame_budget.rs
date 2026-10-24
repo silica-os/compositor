@@ -220,11 +220,16 @@ fn genie(scene: &mut Scene) {
 }
 
 fn stage_p99(times: &RenderTimes, name: &str) -> Option<f64> {
+    stage_at(times, name, 99)
+}
+
+/// A stage's 50th or 99th percentile.
+fn stage_at(times: &RenderTimes, name: &str, at: u8) -> Option<f64> {
     times
         .stages
         .iter()
         .find(|s| s.stage == name)
-        .map(|s| s.p99_ms)
+        .map(|s| if at == 50 { s.p50_ms } else { s.p99_ms })
 }
 
 #[test]
@@ -251,7 +256,7 @@ fn frame_budget() {
         frames()
     );
     println!(
-        "{:<9} {:>6} {:>7} {:>7} {:>7} {:>7} | p99 {:>6} {:>6} {:>6} {:>6} | glass {:>6} {:>6} {:>6}",
+        "{:<9} {:>6} {:>7} {:>7} {:>7} {:>7} | stage {:>6} {:>6} {:>6} {:>6} {:>6} | glass {:>6} {:>6} {:>6}",
         "scenario",
         "frames",
         "p50",
@@ -261,6 +266,7 @@ fn frame_budget() {
         "build",
         "draw",
         "submit",
+        "wait",
         "gpu",
         "bdrop",
         "blur",
@@ -268,23 +274,29 @@ fn frame_budget() {
     );
     for (name, drive) in scenarios {
         let times = scene.measure(drive);
-        let stage = |s| stage_p99(&times, s).map_or("-".to_owned(), |v| format!("{v:.3}"));
-        println!(
-            "{:<9} {:>6} {:>7.3} {:>7.3} {:>7.3} {:>7.3} |     {:>6} {:>6} {:>6} {:>6} |       {:>6} {:>6} {:>6}",
-            name,
-            times.frames,
-            times.p50_ms,
-            times.p95_ms,
-            times.p99_ms,
-            times.max_ms,
-            stage("build"),
-            stage("draw"),
-            stage("submit"),
-            stage("gpu"),
-            stage("glass.backdrop"),
-            stage("glass.blur"),
-            stage("glass.material"),
-        );
+        // Each stage at p50 and at p99, on two rows.
+        for (row, at) in [("p50", 50), ("p99", 99)] {
+            let stage = |s| stage_at(&times, s, at).map_or("-".to_owned(), |v| format!("{v:.3}"));
+            let head = if at == 50 {
+                format!(
+                    "{:<9} {:>6} {:>7.3} {:>7.3} {:>7.3} {:>7.3}",
+                    name, times.frames, times.p50_ms, times.p95_ms, times.p99_ms, times.max_ms
+                )
+            } else {
+                format!("{:<46}", "")
+            };
+            println!(
+                "{head} | {row:>5} {:>6} {:>6} {:>6} {:>6} {:>6} |       {:>6} {:>6} {:>6}",
+                stage("build"),
+                stage("draw"),
+                stage("submit"),
+                stage("wait"),
+                stage("gpu"),
+                stage("glass.backdrop"),
+                stage("glass.blur"),
+                stage("glass.material"),
+            );
+        }
         assert!(times.frames > 0, "{name}: no frame drawn");
         let over = match renderer.as_str() {
             "cpu" => times.p99_ms >= 2.42,
