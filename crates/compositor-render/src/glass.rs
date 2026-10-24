@@ -1175,7 +1175,7 @@ pub(crate) fn buffer_size(size: Size<i32, Physical>) -> Size<i32, Buffer> {
 
 /// Draws `elements` (from the front to the back) over `clear_color` into a new texture
 /// covering `bbox` of the output: the glass background, the snapshot of a closing
-/// window.
+/// window. What opaque elements hide is neither cleared nor drawn.
 pub fn render_to_texture<E: RenderElement<SilicaRenderer>>(
     renderer: &mut SilicaRenderer,
     elements: &[E],
@@ -1183,19 +1183,51 @@ pub fn render_to_texture<E: RenderElement<SilicaRenderer>>(
     scale: f64,
     clear_color: [f32; 4],
 ) -> Result<SilicaTexture, SilicaError> {
+    let scale = Scale::from(scale);
+    let full = Rectangle::from_size(bbox.size);
+    // From the front: what each element shows past the opaque ones before it (in `bbox`),
+    // as damage in its own coordinates.
+    let mut covered: Vec<Rectangle<i32, Physical>> = Vec::new();
+    let mut draws = Vec::new();
+    for element in elements {
+        let geometry = element.geometry(scale);
+        let Some(visible) = geometry.intersection(bbox) else {
+            continue;
+        };
+        let at = geometry.loc - bbox.loc;
+        let shown = Rectangle::subtract_rects_many(
+            [Rectangle::new(visible.loc - bbox.loc, visible.size)],
+            covered.iter().copied(),
+        );
+        if shown.is_empty() {
+            continue;
+        }
+        let opaque: Vec<_> = if element.alpha() >= 1.0 {
+            element.opaque_regions(scale).iter().copied().collect()
+        } else {
+            Vec::new()
+        };
+        covered.extend(
+            opaque
+                .iter()
+                .filter_map(|r| Rectangle::new(r.loc + at, r.size).intersection(full)),
+        );
+        let damage: Vec<_> = shown
+            .into_iter()
+            .map(|r| Rectangle::new(r.loc - at, r.size))
+            .collect();
+        draws.push((element, Rectangle::new(at, geometry.size), damage, opaque));
+    }
     let mut texture = renderer.create_buffer(Fourcc::Abgr8888, buffer_size(bbox.size))?;
     {
         let mut target = renderer.bind(&mut texture)?;
         let mut frame = renderer.render(&mut target, bbox.size, Transform::Normal)?;
-        frame.clear(clear_color.into(), &[Rectangle::from_size(bbox.size)])?;
-        for element in elements.iter().rev() {
-            let geometry = element.geometry(Scale::from(scale));
-            let Some(visible) = geometry.intersection(bbox) else {
-                continue;
-            };
-            let dst = Rectangle::new(geometry.loc - bbox.loc, geometry.size);
-            let damage = [Rectangle::new(visible.loc - geometry.loc, visible.size)];
-            element.draw(&mut frame, element.src(), dst, &damage, &[])?;
+        let clear = Rectangle::subtract_rects_many([full], covered);
+        if !clear.is_empty() {
+            frame.clear(clear_color.into(), &clear)?;
+        }
+        for (element, dst, damage, opaque) in draws.iter().rev() {
+            element.draw(&mut frame, element.src(), *dst, damage, opaque)?;
         }
         // Same GL context for whoever uses the texture: the order of the commands is enough.
         let _sync = frame.finish()?;
