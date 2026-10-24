@@ -23,9 +23,10 @@ pub fn headless_renderer(prefer_gpu: bool) -> Result<GlesRenderer, String> {
     let mut errors = Vec::new();
     for device in devices {
         let software = device.is_software();
+        let node = device.render_device_path().ok();
         match renderer_for(device) {
             Ok(renderer) => {
-                info!("headless su GLES (device software: {software})");
+                info!("headless on GLES (software device: {software}, node: {node:?})");
                 return Ok(renderer);
             }
             Err(err) => {
@@ -139,14 +140,19 @@ impl GpuTimer {
         self.active = started.ok().flatten();
     }
 
-    /// Ends the timing started by `begin`; `drawn` says whether the frame counts.
+    /// Ends the timing started by `begin`; `drawn` says whether the frame counts. Called as
+    /// soon as the frame is sent: the end goes to the GPU at once, right behind the frame, so
+    /// the time does not run on while the GPU waits for the next commands.
     pub fn end(&mut self, renderer: &mut GlesRenderer, drawn: bool) {
         let Some(query) = self.active.take() else {
             return;
         };
         let ended = renderer.with_context(|gl| {
             // SAFETY: the context is current and `query` is the active TIME_ELAPSED query.
-            unsafe { gl.EndQuery(TIME_ELAPSED) }
+            unsafe {
+                gl.EndQuery(TIME_ELAPSED);
+                gl.Flush();
+            }
         });
         if ended.is_ok() {
             self.pending.push_back((query, drawn));

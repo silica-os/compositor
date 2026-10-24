@@ -13,6 +13,10 @@
 //! p50/p95/p99/max of the drawn frames and the p99 of each stage. The gate of the renderer is
 //! asserted: `cpu` p99 < 2.42 ms; `gpu` compositor p99 < 0.5 ms and GPU p99 < 0.5 ms. GLES on
 //! llvmpipe (no variable) has no gate: it is the baseline.
+//!
+//! `gpu` takes the first hardware EGL device glvnd lists. On a machine with NVIDIA's closed
+//! driver next to a Mesa GPU, this keeps the bench on Mesa, the stack Silica ships:
+//! `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json`.
 
 #![allow(
     clippy::unwrap_used,
@@ -54,10 +58,12 @@ struct Scene {
 
 impl Scene {
     fn open() -> Self {
+        // `FRAME_BUDGET_GLASS` (full by default): another level, to see what the glass costs.
+        let glass = std::env::var("FRAME_BUDGET_GLASS").unwrap_or_else(|_| "full".into());
         let compositor = Headless::start_with_env(
             "frame-budget",
             SCREEN,
-            &["--glass", "full"],
+            &["--glass", &glass],
             &[("SILICA_COMPOSITOR_HEADLESS_FRAMES", "1")],
         );
         let socket = compositor.wayland.clone();

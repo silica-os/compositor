@@ -581,6 +581,10 @@ fn draw_headless(
         return Ok(None);
     }
     let drawn = Instant::now();
+    // The GPU time ends with the frame sent, not after the wait.
+    if let (Some(timer), Some(gles)) = (&mut frames.timer, renderer.gles()) {
+        timer.end(gles, true);
+    }
     result.sync.wait().map_err(|e| format!("sync: {e:?}"))?;
     Ok(Some((drawn - start, drawn.elapsed())))
 }
