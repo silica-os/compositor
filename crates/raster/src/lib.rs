@@ -494,10 +494,27 @@ impl CpuRenderer {
         dmabuf
             .sync_plane(0, DmabufSyncFlags::START | DmabufSyncFlags::WRITE)
             .map_err(CpuError::Sync)?;
-        let image = shadow.read();
+        let (guard, layout) = (shadow.read(), shadow.layout());
+        let image = &*guard;
+        let rects: Vec<Rect> = disjoint.iter().map(|rect| Rect::of(*rect)).collect();
+        // The rows the damage covers, on the workers as a frame's bands are.
+        let top = rects.iter().map(|r| r.y0).min().unwrap_or(0).max(0);
+        let bottom = rects.iter().map(|r| r.y1).max().unwrap_or(0).max(top);
+        let (top, bottom) = (top as usize, bottom as usize);
         let bytes = memory::mapped_mut(mapping);
-        for rect in &disjoint {
-            image.store(bytes, stride, shadow.layout(), Rect::of(*rect), (0, 0));
+        let end = bottom.saturating_mul(stride).min(bytes.len());
+        if let Some(rows) = bytes.get_mut(top.saturating_mul(stride)..end) {
+            exec::rows(self.pool.as_ref(), rows, stride, |i, row| {
+                let y = i32::try_from(top + i).unwrap_or(i32::MAX);
+                for rect in rects.iter().filter(|r| (r.y0..r.y1).contains(&y)) {
+                    let line = Rect {
+                        y0: y,
+                        y1: y + 1,
+                        ..*rect
+                    };
+                    image.store(row, stride, layout, line, (0, y));
+                }
+            });
         }
         dmabuf
             .sync_plane(0, DmabufSyncFlags::END | DmabufSyncFlags::WRITE)
