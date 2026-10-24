@@ -7,7 +7,7 @@
 #![allow(unsafe_code)]
 
 use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
-use smithay::backend::renderer::gles::{GlesRenderer, ffi};
+use smithay::backend::renderer::gles::{Capability, GlesRenderer, ffi};
 use std::collections::VecDeque;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -46,7 +46,30 @@ fn renderer_for(device: EGLDevice) -> Result<GlesRenderer, String> {
     let context = EGLContext::new(&display).map_err(|e| format!("context: {e}"))?;
     // SAFETY: the context is just created and not current on any other thread; the
     // renderer stays on the compositor thread, the only one using it.
-    unsafe { GlesRenderer::new(context) }.map_err(|e| format!("renderer: {e}"))
+    unsafe { renderer_on(context) }
+}
+
+/// A GLES renderer on `context`, without smithay's per-texture fences.
+///
+/// With `Capability::Fencing` smithay puts a `glFenceSync` behind every texture draw and
+/// upload, to order them against other contexts sharing the textures. The compositor has one
+/// context and no shared ones, where GL already orders its own commands; and on drivers without
+/// deferred flushes (virgl) each fence is a submission to the host, about 60 µs per draw.
+/// The frame's own fence (`Capability::ExportFence`) stays.
+///
+/// # Safety
+///
+/// As `GlesRenderer::new`: `context` is not current on another thread and the renderer
+/// stays on the thread that creates it.
+unsafe fn renderer_on(context: EGLContext) -> Result<GlesRenderer, String> {
+    // SAFETY: the caller's conditions are smithay's.
+    let capabilities = unsafe { GlesRenderer::supported_capabilities(&context) }
+        .map_err(|e| format!("capabilities: {e}"))?
+        .into_iter()
+        .filter(|capability| *capability != Capability::Fencing);
+    // SAFETY: as above.
+    unsafe { GlesRenderer::with_capabilities(context, capabilities) }
+        .map_err(|e| format!("renderer: {e}"))
 }
 
 /// A GLES renderer on a GBM device, for the real-session backend: it draws into the GBM
@@ -59,7 +82,7 @@ pub fn gbm_renderer(
     let display = unsafe { EGLDisplay::new(gbm) }.map_err(|e| format!("GBM display: {e}"))?;
     let context = EGLContext::new(&display).map_err(|e| format!("context: {e}"))?;
     // SAFETY: as in `renderer_for`: a new context, used only on the compositor thread.
-    unsafe { GlesRenderer::new(context) }.map_err(|e| format!("renderer: {e}"))
+    unsafe { renderer_on(context) }
 }
 
 /// The GPU's own time on the frames, from `GL_EXT_disjoint_timer_query` on the GLES 3 queries: a
