@@ -407,10 +407,26 @@ fn frame(
     scale: f64,
     clear: [f32; 4],
 ) -> (Image, Vec<GlassElement>) {
+    frame_in(gpu, cache, regions, layers, size, scale, clear, false)
+}
+
+/// `frame`, with the glass blurred inside the frame where it can be (`in_frame`).
+#[allow(clippy::too_many_arguments)]
+fn frame_in(
+    gpu: &mut Gpu,
+    cache: &GlassCache,
+    regions: &[PhysicalRegion],
+    layers: &[Layer],
+    size: Size<i32, Physical>,
+    scale: f64,
+    clear: [f32; 4],
+    in_frame: bool,
+) -> (Image, Vec<GlassElement>) {
     let glass = cache
         .elements(
             &mut gpu.renderer,
             regions,
+            in_frame.then_some(&layers[..0]),
             layers,
             layers,
             GlassQuality::Full,
@@ -630,6 +646,116 @@ fn every_kind_blurs_at_its_scale_like_at_full_resolution() {
     assert!(failures.is_empty(), "over the thresholds: {failures:#?}");
 }
 
+/// The glass blurred inside the frame, from what the frame drew behind it, is the glass blurred
+/// offscreen: every kind at 1× and 2×, reduced or at full resolution, made once and then
+/// reused.
+#[test]
+fn the_blur_in_the_frame_equals_the_offscreen_one() {
+    let mut gpu = gpu();
+    let clear = [0.0, 0.0, 0.0, 1.0];
+    let mut failures = Vec::new();
+    for case in cases() {
+        for scale in [1.0, 2.0] {
+            let size = Size::from((px(CANVAS_PT.0, scale), px(CANVAS_PT.1, scale)));
+            let regions = [region(&case, scale, case.profile.blur_scale)];
+            for (name, image) in backdrops_at(&mut gpu, scale).into_iter().take(2) {
+                let layers = [Layer::new(&mut gpu.renderer, image, Point::from((0, 0)))];
+                let (offscreen, _) = frame(
+                    &mut gpu,
+                    &GlassCache::default(),
+                    &regions,
+                    &layers,
+                    size,
+                    scale,
+                    clear,
+                );
+                let cache = GlassCache::default();
+                for pass in ["made", "reused"] {
+                    let (inside, glass) = frame_in(
+                        &mut gpu, &cache, &regions, &layers, size, scale, clear, true,
+                    );
+                    assert!(
+                        !glass.is_empty() && glass.iter().all(GlassElement::blurs_in_frame),
+                        "{}: not blurred in the frame",
+                        case.name
+                    );
+                    let (mean, max) = difference(&offscreen, &inside, Rectangle::from_size(size));
+                    eprintln!(
+                        "{:<22} {scale}× {name} {pass}: mean {mean:.4}, max {max}",
+                        case.name
+                    );
+                    if max > 1 {
+                        failures.push(format!(
+                            "{} {scale}× {name} {pass}: mean {mean:.4}, max {max}",
+                            case.name
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the blur in the frame differs: {failures:#?}"
+    );
+}
+
+/// A blur in the frame that the frame cannot make (here, the box not drawn again whole) sends
+/// the glass back offscreen, with new elements, so that the next frame draws it whole.
+#[test]
+fn a_blur_in_the_frame_that_fails_goes_back_offscreen() {
+    let mut gpu = gpu();
+    let clear = [0.0, 0.0, 0.0, 1.0];
+    let case = cases().remove(0);
+    let size = Size::from((px(CANVAS_PT.0, 1.0), px(CANVAS_PT.1, 1.0)));
+    let regions = [region(&case, 1.0, case.profile.blur_scale)];
+    let image = backdrops_at(&mut gpu, 1.0).remove(0).1;
+    let layers = [Layer::new(&mut gpu.renderer, image, Point::from((0, 0)))];
+    let cache = GlassCache::default();
+    let elements = |gpu: &mut Gpu| {
+        cache
+            .elements(
+                &mut gpu.renderer,
+                &regions,
+                Some(&layers[..0]),
+                &layers,
+                &layers,
+                GlassQuality::Full,
+                Rectangle::from_size(size),
+                1.0,
+                clear,
+            )
+            .unwrap()
+    };
+    let glass = elements(&mut gpu);
+    assert!(glass.iter().all(GlassElement::blurs_in_frame));
+    // Half of the box damaged: the framebuffer elsewhere is not the backdrop.
+    let buffer = Size::<i32, Buffer>::from((size.w, size.h));
+    let mut texture: SilicaTexture = gpu
+        .renderer
+        .create_buffer(Fourcc::Abgr8888, buffer)
+        .unwrap();
+    {
+        let mut target = gpu.renderer.bind(&mut texture).unwrap();
+        let mut frame = gpu
+            .renderer
+            .render(&mut target, size, Transform::Normal)
+            .unwrap();
+        for element in &glass {
+            let geometry = element.geometry(Scale::from(1.0));
+            let half = Rectangle::from_size(Size::from((geometry.size.w / 2, geometry.size.h)));
+            element
+                .draw(&mut frame, element.src(), geometry, &[half], &[])
+                .unwrap();
+        }
+        let _ = frame.finish().unwrap();
+    }
+    let commit = glass[0].current_commit();
+    let again = elements(&mut gpu);
+    assert!(!again.iter().any(GlassElement::blurs_in_frame));
+    assert_ne!(again[0].current_commit(), commit);
+}
+
 /// The table to choose the scales from: every case at every scale and factor (not run by
 /// default).
 #[test]
@@ -782,6 +908,7 @@ fn refracted(
         .elements(
             &mut gpu.renderer,
             &[region],
+            None,
             &layers,
             &layers,
             quality,

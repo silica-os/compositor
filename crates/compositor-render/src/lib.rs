@@ -14,6 +14,7 @@ mod cpu;
 pub mod filter;
 pub mod genie;
 pub mod glass;
+mod glass_gl;
 pub mod glass_profile;
 pub mod renderer;
 pub mod shadow;
@@ -86,6 +87,8 @@ pub struct GlesPrograms {
     pub titlebar: Option<GlesPixelProgram>,
     pub border: Option<GlesPixelProgram>,
     pub glass: Option<glass::GlassPrograms>,
+    /// The glass blurred inside the frame (`glass_gl`), where the context allows it.
+    pub(crate) capture: Option<glass_gl::BlurPrograms>,
     pub tone: Option<GlesTexProgram>,
     pub genie: Option<GlesTexProgram>,
     pub filter: Option<GlesTexProgram>,
@@ -134,6 +137,23 @@ pub(crate) fn frame_programs<'a>(frame: &'a GlesFrame<'_, '_>) -> Option<&'a Gle
     frame.egl_context().user_data().get::<GlesPrograms>()
 }
 
+/// The programs of the glass blurred inside the frame, once compiled (`gles_programs`).
+pub(crate) fn capture_programs(renderer: &mut GlesRenderer) -> Option<&glass_gl::BlurPrograms> {
+    if renderer
+        .egl_context()
+        .user_data()
+        .get::<GlesPrograms>()
+        .is_none()
+    {
+        gles_programs(renderer);
+    }
+    renderer
+        .egl_context()
+        .user_data()
+        .get::<GlesPrograms>()
+        .and_then(|programs| programs.capture.as_ref())
+}
+
 /// The renderer programs, compiled on the first request and kept in the EGL context.
 pub fn gles_programs(renderer: &mut GlesRenderer) -> GlesPrograms {
     if let Some(shaders) = renderer.egl_context().user_data().get::<GlesPrograms>() {
@@ -173,6 +193,7 @@ pub fn gles_programs(renderer: &mut GlesRenderer) -> GlesPrograms {
                 upsample,
             },
         );
+    let capture = glass.as_ref().and_then(|_| glass_gl::compile(renderer));
     let tone = compile_texture(
         renderer,
         "bar backdrop",
@@ -192,6 +213,7 @@ pub fn gles_programs(renderer: &mut GlesRenderer) -> GlesPrograms {
         titlebar,
         border,
         glass,
+        capture,
         tone,
         genie,
         filter,

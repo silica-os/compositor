@@ -9,6 +9,7 @@
 //! materials are `docs/design/amalfi/materials.md` (`glass_profile`).
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
@@ -17,10 +18,11 @@ use smithay::backend::renderer::gles::{
     GlesError, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformType, UniformValue,
 };
 use smithay::backend::renderer::utils::CommitCounter;
-use smithay::backend::renderer::{Bind, Frame, Offscreen, Renderer};
+use smithay::backend::renderer::{Bind, Frame, Offscreen, Renderer, Texture};
 use smithay::utils::{Buffer, Physical, Point, Rectangle, Scale, Size, Transform};
 
 use crate::cpu::material::{Material, Plan};
+use crate::glass_gl::{self, Capture};
 use crate::renderer::{SilicaError, SilicaFrame, SilicaRenderer, SilicaTexture};
 use compositor_raster::{CpuRenderer, CpuTexture};
 
@@ -769,7 +771,14 @@ fn unchanged<E: Element>(
 #[derive(Default)]
 pub struct GlassCache {
     state: RefCell<Option<Cached>>,
+    /// The textures of the GLES blur, from one blur to the next.
+    pool: RefCell<Pool>,
+    /// Frames left blurring offscreen after a blur in the frame failed.
+    offscreen: Cell<u8>,
 }
+
+/// How many frames the glass blurs offscreen after a blur in the frame failed.
+const OFFSCREEN_FRAMES: u8 = 30;
 
 struct Cached {
     quality: GlassQuality,
@@ -786,6 +795,9 @@ struct Cached {
     commit: CommitCounter,
     /// On the CPU, the material of each group.
     materials: Vec<CpuMaterial>,
+    /// The backdrop is blurred inside the frame, from what the frame drew behind the glass
+    /// (`glass_gl`): `textures` are its textures.
+    capture: Option<Rc<Capture>>,
 }
 
 /// Where the glass spent its time since the last [`take_times`], on this thread.
@@ -948,11 +960,18 @@ impl GlassCache {
     /// to the back) and its fixed part (`behind_static`: the desktop wallpaper, for the
     /// frosted level). Error if the renderer cannot draw offscreen: the caller skips the glass
     /// for this frame.
+    ///
+    /// `front`, the elements in front of the glass, is given where the frame is drawn with no
+    /// transform: on GLES, at the full level, the glass then blurs what the frame drew behind
+    /// it, inside the frame, instead of drawing the backdrop again offscreen. Its elements are
+    /// as large as the backdrop, which the damage tracker then draws again whole when it
+    /// changes.
     #[allow(clippy::too_many_arguments)]
     pub fn elements<E: RenderElement<SilicaRenderer>>(
         &self,
         renderer: &mut SilicaRenderer,
         regions: &[PhysicalRegion],
+        front: Option<&[E]>,
         behind: &[E],
         behind_static: &[E],
         quality: GlassQuality,
@@ -993,13 +1012,43 @@ impl GlassCache {
             return Ok(Vec::new());
         };
         let now = seen_in(behind, bbox, scale);
+        let mut state = self.state.borrow_mut();
+
+        // Inside the frame only where everything behind the glass is drawn into it before the
+        // glass: nothing opaque in front hides part of it (the damage tracker would not draw
+        // it there). Nothing behind goes to a plane of its own either: the element covers the
+        // backdrop, and the DRM backend keeps the planes below the frame unused.
+        if state
+            .as_ref()
+            .and_then(|cached| cached.capture.as_ref())
+            .is_some_and(|capture| capture.failed())
+        {
+            self.offscreen.set(OFFSCREEN_FRAMES);
+        }
+        let offscreen = self.offscreen.get();
+        self.offscreen.set(offscreen.saturating_sub(1));
+        let capture = match (&mut *renderer, front) {
+            (SilicaRenderer::Gles(gles), Some(front))
+                if quality == GlassQuality::Full && offscreen == 0 =>
+            {
+                crate::capture_programs(gles).is_some()
+                    && front.iter().all(|element| {
+                        let at = element.geometry(Scale::from(scale)).loc;
+                        element
+                            .opaque_regions(Scale::from(scale))
+                            .iter()
+                            .all(|rect| !Rectangle::new(rect.loc + at, rect.size).overlaps(bbox))
+                    })
+            }
+            _ => false,
+        };
 
         // The textures are reused only if nothing they were made from changed: the elements
         // behind (where the glass reads), the glass's own shapes and materials, the quality,
         // the scale and the clear color. When in doubt they are made again.
-        let mut state = self.state.borrow_mut();
         let reuse = state.as_ref().is_some_and(|cached| {
-            cached.quality == quality
+            cached.capture.is_some() == capture
+                && cached.quality == quality
                 && cached.scale.to_bits() == scale.to_bits()
                 && cached.clear_color.map(f32::to_bits) == clear_color.map(f32::to_bits)
                 && unchanged(&cached.seen, &now, bbox, scale)
@@ -1022,9 +1071,97 @@ impl GlassCache {
                 cached.commit.increment();
             }
         }
-        if !reuse {
+        if !reuse
+            && capture
+            && let SilicaRenderer::Gles(gles) = &mut *renderer
+        {
+            // The frame makes the textures, when the first of the elements draws.
+            let mut keys: Vec<BlurKey> = Vec::new();
+            for region in regions {
+                let key = region.blur_key();
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+            let plans: Vec<glass_gl::Plan> = keys
+                .iter()
+                .map(|key| glass_gl::Plan {
+                    size: bbox.size,
+                    sigma: key.sigma * scale,
+                    factor: key.factor,
+                    sharp: key.sharp,
+                })
+                .collect();
+            let kept = state
+                .as_ref()
+                .and_then(|cached| cached.capture.clone())
+                .filter(|capture| capture.plans(&plans));
+            let capture = match kept {
+                Some(capture) => {
+                    capture.invalidate();
+                    capture
+                }
+                None => {
+                    let Some(programs) = crate::capture_programs(gles).cloned() else {
+                        return Err(SilicaError::Unsupported(
+                            "the glass programs did not compile",
+                        ));
+                    };
+                    Rc::new(Capture::new(gles, programs, &plans)?)
+                }
+            };
+            let textures = keys
+                .into_iter()
+                .zip(capture.textures())
+                .map(|(key, texture)| (key, SilicaTexture::Gles(texture.clone())))
+                .collect();
+            let old = state.take();
+            if let Some(old) = &old
+                && old.capture.is_none()
+            {
+                let mut pool = self.pool.borrow_mut();
+                for (_, texture) in &old.textures {
+                    if let SilicaTexture::Gles(texture) = texture {
+                        pool.give(texture.clone());
+                    }
+                }
+            }
+            let count = groups(regions).len();
+            let (ids, mut commit) = match old {
+                Some(cached) if cached.ids.len() == count => (cached.ids, cached.commit),
+                Some(cached) => ((0..count).map(|_| Id::new()).collect(), cached.commit),
+                None => (
+                    (0..count).map(|_| Id::new()).collect(),
+                    CommitCounter::default(),
+                ),
+            };
+            commit.increment();
+            *state = Some(Cached {
+                quality,
+                seen,
+                scale,
+                clear_color,
+                regions: regions.to_vec(),
+                bbox,
+                textures,
+                ids,
+                commit,
+                materials: Vec::new(),
+                capture: Some(capture),
+            });
+        } else if !reuse {
             let start = Instant::now();
-            let sharp = render_to_texture(renderer, behind, bbox, scale, clear_color)?;
+            let mut sharp = match &mut *renderer {
+                SilicaRenderer::Gles(gles) => SilicaTexture::Gles(self.pool.borrow_mut().take(
+                    gles,
+                    Fourcc::Abgr8888,
+                    bbox.size,
+                )?),
+                SilicaRenderer::Cpu(cpu) => {
+                    SilicaTexture::Cpu(cpu.create_buffer(Fourcc::Abgr8888, buffer_size(bbox.size))?)
+                }
+            };
+            render_into(renderer, &mut sharp, behind, bbox, scale, clear_color)?;
             add_time(|t| &mut t.backdrop, start);
             // The CPU materials keep their geometry, to be painted over the new textures. They
             // are planned before the blur, which makes only the texels they read.
@@ -1072,10 +1209,31 @@ impl GlassCache {
                         .find(|(k, _)| *k == key)
                         .map_or([0; 4], |(_, area)| *area)
                 });
-                let blurred = blur_with(renderer, &sharp, bbox.size, key, scale, area)?;
+                let blurred = blur_with(
+                    renderer,
+                    &mut self.pool.borrow_mut(),
+                    &sharp,
+                    bbox.size,
+                    key,
+                    scale,
+                    area,
+                )?;
                 textures.push((key, blurred));
             }
             add_time(|t| &mut t.blur, start);
+            // The capture and the old blurs are no longer read: the next blur draws into them
+            // (not those of a blur in the frame: its textures stay with it).
+            let mut pool = self.pool.borrow_mut();
+            let old = state
+                .as_mut()
+                .filter(|cached| cached.capture.is_none())
+                .map(|cached| std::mem::take(&mut cached.textures));
+            for texture in std::iter::once(sharp).chain(old.into_iter().flatten().map(|(_, t)| t)) {
+                if let SilicaTexture::Gles(texture) = texture {
+                    pool.give(texture);
+                }
+            }
+            drop(pool);
             let count = groups(regions).len();
             let (ids, mut commit) = match state.take() {
                 Some(cached) if cached.ids.len() == count => (cached.ids, cached.commit),
@@ -1097,6 +1255,7 @@ impl GlassCache {
                 ids,
                 commit,
                 materials,
+                capture: None,
             });
         }
         let Some(cached) = state.as_mut() else {
@@ -1141,6 +1300,7 @@ impl GlassCache {
                 shapes,
                 fallback,
                 material,
+                capture: cached.capture.clone(),
             });
         }
         cached.materials = used;
@@ -1183,6 +1343,20 @@ pub fn render_to_texture<E: RenderElement<SilicaRenderer>>(
     scale: f64,
     clear_color: [f32; 4],
 ) -> Result<SilicaTexture, SilicaError> {
+    let mut texture = renderer.create_buffer(Fourcc::Abgr8888, buffer_size(bbox.size))?;
+    render_into(renderer, &mut texture, elements, bbox, scale, clear_color)?;
+    Ok(texture)
+}
+
+/// `render_to_texture` into `texture`, as large as `bbox`.
+fn render_into<E: RenderElement<SilicaRenderer>>(
+    renderer: &mut SilicaRenderer,
+    texture: &mut SilicaTexture,
+    elements: &[E],
+    bbox: Rectangle<i32, Physical>,
+    scale: f64,
+    clear_color: [f32; 4],
+) -> Result<(), SilicaError> {
     let scale = Scale::from(scale);
     let full = Rectangle::from_size(bbox.size);
     // From the front: what each element shows past the opaque ones before it (in `bbox`),
@@ -1218,9 +1392,8 @@ pub fn render_to_texture<E: RenderElement<SilicaRenderer>>(
             .collect();
         draws.push((element, Rectangle::new(at, geometry.size), damage, opaque));
     }
-    let mut texture = renderer.create_buffer(Fourcc::Abgr8888, buffer_size(bbox.size))?;
     {
-        let mut target = renderer.bind(&mut texture)?;
+        let mut target = renderer.bind(texture)?;
         let mut frame = renderer.render(&mut target, bbox.size, Transform::Normal)?;
         let clear = Rectangle::subtract_rects_many([full], covered);
         if !clear.is_empty() {
@@ -1232,14 +1405,53 @@ pub fn render_to_texture<E: RenderElement<SilicaRenderer>>(
         // Same GL context for whoever uses the texture: the order of the commands is enough.
         let _sync = frame.finish()?;
     }
-    Ok(texture)
+    Ok(())
 }
 
-/// One pass: the part `src` of `source` drawn into a new 8-bit texture `to` large, over
-/// `under` (as large as `to`) if present.
+/// The textures of the GLES passes, kept from one blur to the next: a blur of the same size
+/// draws into the textures of the last one instead of allocating new ones, which on a virtual
+/// GPU are a round trip to the host each.
+#[derive(Default)]
+pub(crate) struct Pool(Vec<GlesTexture>);
+
+/// The spare textures a pool keeps at most: the passes of the blurs of one surface.
+const POOL_SIZE: usize = 12;
+
+impl Pool {
+    /// A texture of `format`, `size` large: a spare one, or a new one.
+    fn take(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        format: Fourcc,
+        size: Size<i32, Physical>,
+    ) -> Result<GlesTexture, GlesError> {
+        let size = buffer_size(size);
+        match self
+            .0
+            .iter()
+            .position(|texture| texture.format() == Some(format) && texture.size() == size)
+        {
+            Some(index) => Ok(self.0.swap_remove(index)),
+            None => Offscreen::<GlesTexture>::create_buffer(renderer, format, size),
+        }
+    }
+
+    /// `texture` is no longer read: a later pass may draw into it. The commands already
+    /// issued that read it come first, in the same context.
+    fn give(&mut self, texture: GlesTexture) {
+        if self.0.len() >= POOL_SIZE {
+            self.0.remove(0);
+        }
+        self.0.push(texture);
+    }
+}
+
+/// One pass: the part `src` of `source` drawn into an 8-bit texture `to` large from `pool`,
+/// over `under` (as large as `to`) if present.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pass(
     renderer: &mut GlesRenderer,
+    pool: &mut Pool,
     source: &GlesTexture,
     src: Rectangle<f64, Buffer>,
     to: Size<i32, Physical>,
@@ -1250,6 +1462,7 @@ pub(crate) fn pass(
 ) -> Result<GlesTexture, GlesError> {
     pass_in(
         renderer,
+        pool,
         Fourcc::Abgr8888,
         source,
         src,
@@ -1265,6 +1478,7 @@ pub(crate) fn pass(
 #[allow(clippy::too_many_arguments)]
 fn pass_in(
     renderer: &mut GlesRenderer,
+    pool: &mut Pool,
     format: Fourcc,
     source: &GlesTexture,
     src: Rectangle<f64, Buffer>,
@@ -1274,7 +1488,7 @@ fn pass_in(
     alpha: f32,
     under: Option<&GlesTexture>,
 ) -> Result<GlesTexture, GlesError> {
-    let mut texture = renderer.create_buffer(format, buffer_size(to))?;
+    let mut texture = pool.take(renderer, format, to)?;
     {
         let mut target = renderer.bind(&mut texture)?;
         let mut frame = renderer.render(&mut target, to, Transform::Normal)?;
@@ -1339,6 +1553,7 @@ impl Blurred {
     pub(crate) fn back(
         &self,
         renderer: &mut GlesRenderer,
+        pool: &mut Pool,
         upsample: &GlesTexProgram,
         size: Size<i32, Physical>,
         alpha: f32,
@@ -1347,6 +1562,7 @@ impl Blurred {
         if self.size == size {
             return pass(
                 renderer,
+                pool,
                 &self.texture,
                 self.src,
                 size,
@@ -1362,6 +1578,7 @@ impl Blurred {
         )];
         pass(
             renderer,
+            pool,
             &self.texture,
             self.src,
             size,
@@ -1403,7 +1620,7 @@ pub(crate) fn reduced_sigma(sigma: f64, factor: u32) -> f64 {
 /// The format of the reduced textures: half floats, so that the extra passes of a reduced
 /// blur (the prefilter) add no 8-bit rounding of their own; the full-resolution blur keeps
 /// 8 bits, as it always had.
-const REDUCED_FORMAT: Fourcc = Fourcc::Abgr16161616f;
+pub(crate) const REDUCED_FORMAT: Fourcc = Fourcc::Abgr16161616f;
 
 /// A separable Gaussian of σ `sigma` pixels over `source` (`size` large) at 1/`factor` of the
 /// resolution (`effective_factor`): a box prefilter down to ceil(size / factor), then the two
@@ -1412,6 +1629,7 @@ const REDUCED_FORMAT: Fourcc = Fourcc::Abgr16161616f;
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn gaussian(
     renderer: &mut GlesRenderer,
+    pool: &mut Pool,
     blur: &GlesTexProgram,
     downsample: &GlesTexProgram,
     edge: BlurEdge,
@@ -1423,7 +1641,7 @@ pub(crate) fn gaussian(
     let factor = effective_factor(sigma, factor);
     if factor > 1 {
         match reduced(
-            renderer, blur, downsample, edge, source, size, sigma, factor,
+            renderer, pool, blur, downsample, edge, source, size, sigma, factor,
         ) {
             Ok(blurred) => return Ok(blurred),
             // When in doubt, full resolution.
@@ -1432,8 +1650,9 @@ pub(crate) fn gaussian(
     }
     let texture = blur_passes(
         renderer,
+        pool,
         blur,
-        source.clone(),
+        source,
         size,
         sigma as f32,
         Fourcc::Abgr8888,
@@ -1449,6 +1668,7 @@ pub(crate) fn gaussian(
 #[allow(clippy::too_many_arguments)]
 fn reduced(
     renderer: &mut GlesRenderer,
+    pool: &mut Pool,
     blur: &GlesTexProgram,
     downsample: &GlesTexProgram,
     edge: BlurEdge,
@@ -1482,6 +1702,7 @@ fn reduced(
     ];
     let prefiltered = pass_in(
         renderer,
+        pool,
         REDUCED_FORMAT,
         source,
         whole(size),
@@ -1493,12 +1714,15 @@ fn reduced(
     )?;
     let texture = blur_passes(
         renderer,
+        pool,
         blur,
-        prefiltered,
+        &prefiltered,
         small,
         sigma_small as f32,
         REDUCED_FORMAT,
-    )?;
+    );
+    pool.give(prefiltered);
+    let texture = texture?;
     // The source covers size / factor of the reduced texture, inside the border.
     let src = Rectangle::new(
         Point::from((f64::from(pad), f64::from(pad))),
@@ -1515,39 +1739,44 @@ fn reduced(
 }
 
 /// The horizontal and vertical passes of a Gaussian of σ `sigma` texture pixels over
-/// `texture` (`size` large), into textures of `format`.
+/// `texture` (`size` large), into textures of `format` from `pool`.
 fn blur_passes(
     renderer: &mut GlesRenderer,
+    pool: &mut Pool,
     blur: &GlesTexProgram,
-    texture: GlesTexture,
+    texture: &GlesTexture,
     size: Size<i32, Physical>,
     sigma: f32,
     format: Fourcc,
 ) -> Result<GlesTexture, GlesError> {
-    let mut current = texture;
-    for step in [(1.0 / size.w as f32, 0.0), (0.0, 1.0 / size.h as f32)] {
+    let pass = |renderer: &mut GlesRenderer, pool: &mut Pool, source, step: (f32, f32)| {
         let uniforms = [
             Uniform::new("step", UniformValue::_2f(step.0, step.1)),
             Uniform::new("sigma", UniformValue::_1f(sigma)),
         ];
-        current = pass_in(
+        pass_in(
             renderer,
+            pool,
             format,
-            &current,
+            source,
             whole(size),
             size,
             Some(blur),
             &uniforms,
             1.0,
             None,
-        )?;
-    }
-    Ok(current)
+        )
+    };
+    let across = pass(renderer, pool, texture, (1.0 / size.w as f32, 0.0))?;
+    let down = pass(renderer, pool, &across, (0.0, 1.0 / size.h as f32));
+    pool.give(across);
+    down
 }
 
 /// `blur` on either renderer; on the CPU only over `area` (`[x0, y0, x1, y1)`), if given.
 fn blur_with(
     renderer: &mut SilicaRenderer,
+    pool: &mut Pool,
     sharp: &SilicaTexture,
     size: Size<i32, Physical>,
     key: BlurKey,
@@ -1562,7 +1791,7 @@ fn blur_with(
                 ));
             };
             Ok(SilicaTexture::Gles(blur(
-                renderer, &programs, sharp, size, key, scale,
+                renderer, pool, &programs, sharp, size, key, scale,
             )?))
         }
         (SilicaRenderer::Cpu(renderer), SilicaTexture::Cpu(sharp)) => {
@@ -1584,6 +1813,7 @@ fn blur_with(
 /// Blurs the capture with the σ and mixes in the sharp share.
 fn blur(
     renderer: &mut GlesRenderer,
+    pool: &mut Pool,
     programs: &GlassPrograms,
     sharp: &GlesTexture,
     size: Size<i32, Physical>,
@@ -1592,6 +1822,7 @@ fn blur(
 ) -> Result<GlesTexture, GlesError> {
     let blurred = gaussian(
         renderer,
+        pool,
         &programs.blur,
         &programs.downsample,
         BlurEdge::Clamp,
@@ -1601,13 +1832,16 @@ fn blur(
         key.factor,
     )?;
     // Back to full resolution, with the sharp share below: w · sharp + (1 − w) · blurred.
-    blurred.back(
+    let back = blurred.back(
         renderer,
+        pool,
         &programs.upsample,
         size,
         1.0 - key.sharp,
         Some(sharp),
-    )
+    );
+    pool.give(blurred.texture);
+    back
 }
 
 /// A color with alpha as a `vec4` uniform.
@@ -1631,6 +1865,16 @@ pub struct GlassElement {
     fallback: bool,
     /// On the CPU, the material painted over `texture`, as large as `area`.
     material: Option<SilicaTexture>,
+    /// The blur made inside the frame (`GlassCache::elements`): the element is then as large
+    /// as `bbox`, the backdrop, and draws only over `area`.
+    capture: Option<Rc<Capture>>,
+}
+
+impl GlassElement {
+    /// Whether it blurs what the frame drew behind it (`GlassCache::elements`).
+    pub fn blurs_in_frame(&self) -> bool {
+        self.capture.is_some()
+    }
 }
 
 impl Element for GlassElement {
@@ -1643,6 +1887,9 @@ impl Element for GlassElement {
     }
 
     fn src(&self) -> Rectangle<f64, Buffer> {
+        if self.capture.is_some() {
+            return whole(self.bbox.size);
+        }
         let local = Rectangle::new(self.area.loc - self.bbox.loc, self.area.size);
         Rectangle::new(
             Point::from((f64::from(local.loc.x), f64::from(local.loc.y))),
@@ -1651,6 +1898,9 @@ impl Element for GlassElement {
     }
 
     fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        if self.capture.is_some() {
+            return self.bbox;
+        }
         self.area
     }
 
@@ -1681,6 +1931,24 @@ impl RenderElement<SilicaRenderer> for GlassElement {
                     return Ok(());
                 };
                 let uniforms = material_uniforms(&self.shapes, self.bbox, self.fallback);
+                if let Some(capture) = &self.capture {
+                    let start = Instant::now();
+                    capture.run(frame, dst, damage);
+                    add_time(|t| &mut t.blur, start);
+                    let AreaPart { src, dst, damage } =
+                        area_part(self.bbox, self.area, dst, damage);
+                    return Ok(frame.render_texture_from_to(
+                        texture,
+                        src,
+                        dst,
+                        &damage,
+                        &[],
+                        Transform::Normal,
+                        opacity,
+                        Some(&program),
+                        &uniforms,
+                    )?);
+                }
                 Ok(frame.render_texture_from_to(
                     texture,
                     src,
@@ -1716,6 +1984,51 @@ impl RenderElement<SilicaRenderer> for GlassElement {
             _ => Err(SilicaError::Mismatch),
         }
     }
+}
+
+/// The part of a blur-in-the-frame element that holds its material: `area` of the texture of
+/// `bbox`, drawn where it falls in `dst` (the box in the frame), and `damage` (relative to
+/// `dst`) inside it, relative to that.
+fn area_part(
+    bbox: Rectangle<i32, Physical>,
+    area: Rectangle<i32, Physical>,
+    dst: Rectangle<i32, Physical>,
+    damage: &[Rectangle<i32, Physical>],
+) -> AreaPart {
+    let local = area.loc - bbox.loc;
+    let src = Rectangle::new(
+        Point::from((f64::from(local.x), f64::from(local.y))),
+        buffer_size(area.size).to_f64(),
+    );
+    // The box drawn at another size (a scaled capture of the output): the area in proportion.
+    let part = if dst.size == bbox.size {
+        Rectangle::new(local, area.size)
+    } else {
+        let sx = f64::from(dst.size.w) / f64::from(bbox.size.w.max(1));
+        let sy = f64::from(dst.size.h) / f64::from(bbox.size.h.max(1));
+        let x0 = (f64::from(local.x) * sx).round() as i32;
+        let y0 = (f64::from(local.y) * sy).round() as i32;
+        let x1 = (f64::from(local.x + area.size.w) * sx).round() as i32;
+        let y1 = (f64::from(local.y + area.size.h) * sy).round() as i32;
+        Rectangle::new(Point::from((x0, y0)), Size::from((x1 - x0, y1 - y0)))
+    };
+    let damage = damage
+        .iter()
+        .filter_map(|rect| rect.intersection(part))
+        .map(|rect| Rectangle::new(rect.loc - part.loc, rect.size))
+        .collect();
+    AreaPart {
+        src,
+        dst: Rectangle::new(dst.loc + part.loc, part.size),
+        damage,
+    }
+}
+
+/// What `area_part` gives: where the material is drawn from and to, and the damage there.
+struct AreaPart {
+    src: Rectangle<f64, Buffer>,
+    dst: Rectangle<i32, Physical>,
+    damage: Vec<Rectangle<i32, Physical>>,
 }
 
 /// The uniforms of `material.frag` for a group of regions (`shapes`, not empty) over the

@@ -1166,12 +1166,16 @@ pub fn output_elements(
             let index = anchor.index.min(elements.len());
             let behind = elements.get(index..).unwrap_or_default();
             let behind_static = elements.get(index.max(static_start)..).unwrap_or_default();
+            // The glass blurs inside the frame only where the frame is drawn as it is.
+            let front = (output.current_transform() == Transform::Normal)
+                .then(|| elements.get(..index).unwrap_or_default());
             let glass = with_states(&anchor.surface, |states| {
                 states.data_map.insert_if_missing(GlassCache::default);
                 states.data_map.get::<GlassCache>().map(|cache| {
                     cache.elements(
                         renderer,
                         &regions,
+                        front,
                         behind,
                         behind_static,
                         context.glass_quality,

@@ -161,6 +161,9 @@ struct OutputSurface {
     waiting: Option<(u64, Option<OutputPresentationFeedback>)>,
     /// The cursor plane's hotspot, on a virtual GPU.
     hotspot: Option<CursorHotspot>,
+    /// Planes below the primary one: a client's buffer shown there leaves a hole in the frame,
+    /// which a glass blurred inside the frame would read.
+    underlays: bool,
     /// The scene's damage since the last frame, at age 1: a tick whose scene did not change
     /// draws nothing. The swapchain's next buffer is older than the frame on screen, and its age
     /// alone would draw the last changes again, for a frame that shows the same.
@@ -417,9 +420,17 @@ fn render_surface(
     }
     // A frame that fails leaves the screen behind the scene the tracker saw.
     surface.redraw = true;
+    let mut flags = FrameFlags::DEFAULT;
+    if surface.underlays
+        && elements.iter().any(|element| {
+            matches!(element, crate::render::OutputElement::Glass(glass) if glass.blurs_in_frame())
+        })
+    {
+        flags.remove(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT);
+    }
     let frame = surface
         .compositor
-        .render_frame(renderer, elements, clear_color, FrameFlags::DEFAULT)
+        .render_frame(renderer, elements, clear_color, flags)
         .map_err(|e| format!("render: {e}"))?;
     surface.redraw = false;
     if frame.is_empty {
@@ -490,6 +501,14 @@ fn create_surface(
         .create_surface(choice.crtc, choice.mode, &[choice.connector])
         .map_err(|e| format!("DRM surface on {}: {e}", choice.name))?;
     let hotspot = CursorHotspot::of(drm, &surface);
+    let planes = surface.planes();
+    let primary = planes.primary.iter().filter_map(|plane| plane.zpos).min();
+    let underlays = primary.is_some_and(|primary| {
+        planes
+            .overlay
+            .iter()
+            .any(|plane| plane.zpos.is_some_and(|zpos| zpos < primary))
+    });
     // The CPU renderer draws linear buffers: where the display has no modifiers the swapchain
     // is allocated with an implicit one, which must then be linear.
     let mut flags = GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT;
@@ -519,6 +538,7 @@ fn create_surface(
         drawn: None,
         waiting: None,
         hotspot,
+        underlays,
         changes: OutputDamageTracker::from_output(output),
         redraw: true,
         stale: 0,
