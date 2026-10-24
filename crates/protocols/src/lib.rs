@@ -6,6 +6,8 @@
 //!   (full-size content with the compositor's buttons on top).
 //! - `silica-menu-bar-v1` (`xml/silica-menu-bar-v1.xml`): surfaces in the compositor's menu
 //!   bar (an app's menu titles, status items).
+//! - `silica-dock-v1` (`xml/silica-dock-v1.xml`): the Dock's control of nodes (windows and layer
+//!   surfaces), gestures and hot corners.
 //!
 //! The server side (`server`) is for the compositor, the client side (`client`) for the embedder.
 
@@ -148,6 +150,51 @@ pub mod window {
         use self::__interfaces::*;
 
         wayland_scanner::generate_client_code!("xml/silica-window-v1.xml");
+    }
+}
+
+/// `silica-dock-v1`.
+pub mod dock {
+    #[cfg(feature = "server")]
+    #[allow(
+        missing_docs,
+        clippy::all,
+        clippy::pedantic,
+        unused_imports,
+        non_upper_case_globals
+    )]
+    pub mod server {
+        use wayland_server;
+        use wayland_server::protocol::*;
+
+        pub mod __interfaces {
+            use wayland_server::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-dock-v1.xml");
+        }
+        use self::__interfaces::*;
+
+        wayland_scanner::generate_server_code!("xml/silica-dock-v1.xml");
+    }
+
+    #[cfg(feature = "client")]
+    #[allow(
+        missing_docs,
+        clippy::all,
+        clippy::pedantic,
+        unused_imports,
+        non_upper_case_globals
+    )]
+    pub mod client {
+        use wayland_client;
+        use wayland_client::protocol::*;
+
+        pub mod __interfaces {
+            use wayland_client::protocol::__interfaces::*;
+            wayland_scanner::generate_interfaces!("xml/silica-dock-v1.xml");
+        }
+        use self::__interfaces::*;
+
+        wayland_scanner::generate_client_code!("xml/silica-dock-v1.xml");
     }
 }
 

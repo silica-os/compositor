@@ -1440,6 +1440,7 @@ impl State {
             animation_speed: speed,
             closing: &self.closing,
             genies: &self.genies,
+            dock: Some(&self.dock),
             now,
             glass_quality,
             glass_level: self.theme_config.glass,

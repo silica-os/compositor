@@ -79,6 +79,13 @@ pub const SWITCHER_CANCEL: &str = "switcher.cancel";
 pub const SWITCHER_EXPOSE: &str = "switcher.expose";
 pub const CONTROLCENTER_TOGGLE: &str = "controlcenter.toggle";
 pub const SYSTEM_STATUS: &str = "system.status";
+/// Spaces, Panorama (Mission Control), App Windows and Show Desktop belong to the Dock: the
+/// compositor forwards these to it (`silica-shell-v1` `command`) and does nothing else.
+pub const SPACE_NEXT: &str = "space.next";
+pub const SPACE_PREVIOUS: &str = "space.previous";
+pub const PANORAMA_TOGGLE: &str = "panorama.toggle";
+pub const PANORAMA_APP: &str = "panorama.app";
+pub const DESKTOP_SHOW: &str = "desktop.show";
 pub const SYSTEM_WIFI: &str = "system.wifi";
 pub const SYSTEM_BLUETOOTH: &str = "system.bluetooth";
 pub const SYSTEM_VOLUME: &str = "system.volume";
@@ -431,6 +438,41 @@ pub const CATALOG: &[CommandSpec] = &[
         label: "Apps",
         description: "Opens or closes the app launcher: all apps in a grid by category, with the recent ones on top (shell component).",
         shortcut: None,
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_NEXT,
+        label: "Next space",
+        description: "Moves to the space on the right (does nothing past the last one) (Dock).",
+        shortcut: Some("Ctrl+Right"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_PREVIOUS,
+        label: "Previous space",
+        description: "Moves to the space on the left (does nothing before the first one) (Dock).",
+        shortcut: Some("Ctrl+Left"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: PANORAMA_TOGGLE,
+        label: "Panorama",
+        description: "Shows all the windows of the space side by side with the spaces bar at the top; if open, closes it (Dock).",
+        shortcut: Some("Ctrl+Up"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: PANORAMA_APP,
+        label: "App windows",
+        description: "Shows the windows of the frontmost app in the middle, with the title below; if already open, closes it (Dock).",
+        shortcut: Some("Ctrl+Down"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: DESKTOP_SHOW,
+        label: "Show desktop",
+        description: "Moves the windows off screen to show the desktop; again (or a click) puts them back (Dock).",
+        shortcut: Some("F11"),
         params: no_params,
     },
     CommandSpec {

@@ -105,6 +105,11 @@ pub struct State {
     /// The windows for the shell (`ext-foreign-toplevel-list`, only to its components).
     pub foreign_toplevel_list: smithay::wayland::foreign_toplevel_list::ForeignToplevelListState,
     pub shell_manager_state: crate::shell::ShellManagerState,
+    /// The Dock's control of windows and layers, gestures and hot corners (`dock_control.rs`).
+    pub dock_manager_state: crate::dock_control::DockManagerState,
+    pub dock: crate::dock_control::DockControl,
+    /// Windows the Dock took off the screen (another space), with the place they come back to.
+    pub dock_hidden: crate::app_hide::HiddenApps,
     /// The shell components bound to `silica_shell_manager_v1`.
     pub shell_managers:
         Vec<silica_protocols::shell::server::silica_shell_manager_v1::SilicaShellManagerV1>,
@@ -149,8 +154,7 @@ pub struct State {
     pub power_config: crate::config::PowerConfig,
     /// `theme.json`: the glass level.
     pub theme_config: crate::config::ThemeConfig,
-    /// `hotcorners.json`, and the corner the pointer is in now.
-    pub hot_corners: crate::config::HotCornersConfig,
+    /// The corner the pointer is in now.
     pub hot_corner_inside: Option<crate::config::Corner>,
     pub last_activity: Instant,
     /// The last input; `last_activity` also restarts while an idle inhibitor holds.
@@ -312,6 +316,10 @@ impl State {
     /// Whether the compositor itself is animating (not a client): a window closing or minimizing,
     /// an animated pointer. Frames are drawn on every tick then.
     pub fn compositor_animating(&mut self) -> bool {
+        // Windows held for the Dock to take over end by themselves.
+        if self.dock_tick() {
+            return true;
+        }
         if !self.closing.is_empty()
             || !self.genies.is_empty()
             || self.resizing.is_some()
@@ -377,6 +385,7 @@ impl State {
         crate::image_copy::create_globals(&dh);
         let foreign_toplevel_list = crate::shell::toplevel_list(&dh);
         let shell_manager_state = crate::shell::ShellManagerState::new(&dh);
+        let dock_manager_state = crate::dock_control::DockManagerState::new(&dh);
         // Only the shell's locker may lock the session.
         let session_lock_state = smithay::wayland::session_lock::SessionLockManagerState::new::<
             State,
@@ -470,6 +479,9 @@ impl State {
             window_manager_state,
             foreign_toplevel_list,
             shell_manager_state,
+            dock_manager_state,
+            dock: crate::dock_control::DockControl::default(),
+            dock_hidden: crate::app_hide::HiddenApps::default(),
             shell_managers: Vec::new(),
             transients: Vec::new(),
             transient_press: false,
@@ -493,7 +505,6 @@ impl State {
             input_config: crate::config::InputConfig::default(),
             power_config: crate::config::PowerConfig::default(),
             theme_config: crate::config::ThemeConfig::default(),
-            hot_corners: crate::config::HotCornersConfig::default(),
             hot_corner_inside: None,
             last_activity: Instant::now(),
             last_input: Instant::now(),

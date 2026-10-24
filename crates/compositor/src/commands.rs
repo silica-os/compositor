@@ -33,14 +33,14 @@ use silica_control::commands::{
     SYSTEM_VOLUME_DOWN_FINE, SYSTEM_VOLUME_UP, SYSTEM_VOLUME_UP_FINE, SYSTEM_WIFI, ValueParams,
 };
 use silica_control::commands::{
+    DESKTOP_SHOW, LAUNCHER_TOGGLE, PANORAMA_APP, PANORAMA_TOGGLE, SPACE_NEXT, SPACE_PREVIOUS,
+    SWITCHER_CANCEL, SWITCHER_COMMIT, SWITCHER_EXPOSE, SWITCHER_NEXT, SWITCHER_PREVIOUS,
+};
+use silica_control::commands::{
     DOCK_ICONS, DockIconsParams, MinimizeEffectParams, WINDOW_MINIMIZE_EFFECT,
 };
 use silica_control::commands::{
     IDLE_STATE, INPUT_STATE, KEYBOARD_NEXT_SOURCE, KEYBOARD_SELECT_SOURCE, KEYBOARD_STATE,
-};
-use silica_control::commands::{
-    LAUNCHER_TOGGLE, SWITCHER_CANCEL, SWITCHER_COMMIT, SWITCHER_EXPOSE, SWITCHER_NEXT,
-    SWITCHER_PREVIOUS,
 };
 use silica_control::commands::{OUTPUT_COLOR_TEMPERATURE, OUTPUT_CONFIGURE, OUTPUT_LIST};
 use silica_control::{CaptureAnnouncement, CaptureOptions, ScreenshotSettings};
@@ -334,7 +334,8 @@ impl State {
                 self.switcher_active = false;
                 Ok(json!({ "forwarded": self.forward_to_shell(id) }))
             }
-            FARO_TOGGLE | NOTIFICATIONS_TOGGLE | CONTROLCENTER_TOGGLE | LAUNCHER_TOGGLE => {
+            FARO_TOGGLE | NOTIFICATIONS_TOGGLE | CONTROLCENTER_TOGGLE | LAUNCHER_TOGGLE
+            | SPACE_NEXT | SPACE_PREVIOUS | PANORAMA_TOGGLE | PANORAMA_APP | DESKTOP_SHOW => {
                 // Faro, the Launcher and the panels open over every menu (#237).
                 self.dismiss_transients();
                 let sent = self.forward_to_shell(id);
@@ -441,6 +442,7 @@ impl State {
                         .elements()
                         .chain(self.minimized.iter().map(|(w, _)| w))
                         .chain(self.hidden_apps.windows())
+                        .chain(self.dock_hidden.windows())
                         .filter(|w| crate::windows::window_app(w).as_deref() == Some(app.as_str()))
                         .cloned()
                         .collect();
@@ -986,6 +988,7 @@ impl State {
             .elements()
             .chain(self.minimized.iter().map(|(w, _)| w))
             .chain(self.hidden_apps.windows())
+            .chain(self.dock_hidden.windows())
             .filter(|w| crate::windows::window_app(w).as_deref() == Some(app_id))
             .filter_map(|w| {
                 let surface = w.toplevel()?.wl_surface().clone();

@@ -133,6 +133,7 @@ impl State {
             .elements()
             .chain(self.minimized.iter().map(|(w, _)| w))
             .chain(self.hidden_apps.windows())
+            .chain(self.dock_hidden.windows())
             .find(|w| w.toplevel() == Some(surface))
         else {
             return;
@@ -155,11 +156,13 @@ impl State {
             .chain(self.minimized.iter().map(|(w, _)| w))
             .chain(self.hidden.iter().map(|(w, _)| w))
             .chain(self.hidden_apps.windows())
+            .chain(self.dock_hidden.windows())
             .find(|w| w.toplevel() == Some(surface))
             .cloned();
         if let Some(window) = &window {
             self.withdraw_toplevel(window);
             self.forget_hidden_window(window);
+            self.dock_forget_window(window);
         }
         self.minimized
             .retain(|(w, _)| w.toplevel() != Some(surface));
@@ -360,6 +363,7 @@ impl State {
             .elements()
             .chain(self.minimized.iter().map(|(w, _)| w))
             .chain(self.hidden_apps.windows())
+            .chain(self.dock_hidden.windows())
             .find(|w| toplevel_handle(w).is_some_and(|handle| handle.identifier() == identifier))
             .cloned();
         let Some(window) = window else {

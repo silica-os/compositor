@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="silica_dock_v1">
+  <copyright>
+    Copyright © 2026 Silica contributors
+
+    Licensed under MIT OR Apache-2.0.
+  </copyright>
+
+  <description summary="the Dock's hold on what the compositor shows">
+    Reserved to the Dock (a shell component, `SILICA_SHELL=1`): the global is visible only to
+    shell components and only one client can hold the control at a time.
+
+    On macOS the Dock drives Spaces, Mission Control, App Windows, Show Desktop, the hot corners
+    and the minimize effect through WindowServer. This is Silica's counterpart: the compositor
+    keeps drawing the windows (no copies are sent anywhere: live contents, shadows, glass) and
+    the Dock decides where, how big, how opaque and whether they show, frame by frame, with the
+    measured curves. The compositor offers primitives and reports; the Dock decides.
+
+    - The control announces every window and every layer surface as a node. A node's frame is
+      reported; the Dock can hide it, or place it (one or several times) anywhere on the
+      desktop at any scale, optionally clipped, and warp it as a genie. Without a request the
+      compositor shows a node where it is, as it always does.
+    - Requests are double-buffered on the control: they take effect together at `commit`, in
+      one frame, so that a set of windows never moves out of step.
+    - While the control is bound the compositor no longer runs the minimize animation, hot
+      corner actions, space or Mission Control shortcuts and gestures: it reports them and the
+      Dock acts. Without a Dock nothing of this happens (windows minimize without effect, there
+      is only one space).
+    - Input needs no request: while a view is open the Dock puts a full-screen surface on the
+      overlay layer with exclusive keyboard focus, and the pointer and keys go to it as to
+      any layer surface. Nodes the Dock hides do not take pointer or keyboard focus.
+  </description>
+
+  <interface name="silica_dock_manager_v1" version="1">
+    <description summary="gives the Dock its control"/>
+
+    <request name="destroy" type="destructor">
+      <description summary="the manager is no longer needed"/>
+    </request>
+
+    <enum name="error">
+      <entry name="already_bound" value="0" summary="another client holds the control"/>
+    </enum>
+
+    <request name="get_control">
+      <description summary="takes the control">
+        One client at a time. The compositor announces the current windows and layer surfaces
+        as nodes, then the changes. When the control goes (destroy, or the client exits) every
+        override it made ends: all nodes show where they are, and a minimized window is
+        minimized without effect.
+      </description>
+      <arg name="id" type="new_id" interface="silica_dock_control_v1"/>
+    </request>
+  </interface>
+
+  <interface name="silica_dock_control_v1" version="1">
+    <description summary="what the Dock sees and decides"/>
+
+    <request name="destroy" type="destructor">
+      <description summary="releases the control"/>
+    </request>
+
+    <enum name="kind">
+      <entry name="window" value="0" summary="a toplevel: key is its ext-foreign-toplevel identifier"/>
+      <entry name="layer" value="1" summary="a layer surface: key is its namespace"/>
+    </enum>
+
+    <event name="node">
+      <description summary="a window or a layer surface exists">
+        Sent for every existing node when the control is taken and for every new one after.
+        Windows are announced when they map (the same moment as ext-foreign-toplevel-list's
+        toplevel event), layer surfaces on their first commit. The Dock's own surfaces are
+        nodes too (kind layer, its namespace); it leaves them alone.
+      </description>
+      <arg name="node" type="new_id" interface="silica_dock_node_v1"/>
+      <arg name="kind" type="uint" enum="kind"/>
+      <arg name="key" type="string"/>
+    </event>
+
+    <request name="commit">
+      <description summary="applies the pending requests of every node">
+        The pending requests of all the nodes take effect together at the next repaint. A
+        commit with nothing pending does nothing.
+      </description>
+    </request>
+
+    <!-- Gestures. -->
+
+    <enum name="error">
+      <entry name="invalid_fingers" value="0" summary="swipe fingers must be 0, 3 or 4"/>
+    </enum>
+
+    <request name="set_swipe_fingers">
+      <description summary="which swipes belong to the Dock">
+        Swipes with this many fingers are reported with `swipe` and not delivered to apps: 3
+        or 4, or 0 for none (the default: every swipe goes to the app). Pinches with four or
+        more fingers (and the thumb-and-three-fingers pinch) are always the Dock's while it
+        holds the control.
+      </description>
+      <arg name="fingers" type="uint"/>
+    </request>
+
+    <enum name="phase">
+      <entry name="begin" value="0"/>
+      <entry name="update" value="1"/>
+      <entry name="end" value="2" summary="the fingers lifted"/>
+      <entry name="cancel" value="3" summary="the system took the gesture back"/>
+    </enum>
+
+    <event name="swipe">
+      <description summary="a swipe of the Dock's finger count">
+        dx and dy are the movement since begin, in the unaccelerated device units the
+        compositor receives (about 1 per logical pixel at normal speed); on the end event
+        they are the total.
+      </description>
+      <arg name="phase" type="uint" enum="phase"/>
+      <arg name="fingers" type="uint"/>
+      <arg name="dx" type="fixed"/>
+      <arg name="dy" type="fixed"/>
+    </event>
+
+    <event name="pinch">
+      <description summary="a pinch or a spread with four or more fingers">
+        scale is 1 at begin, below 1 while the fingers close (the launcher), above 1 while
+        they open (Show Desktop).
+      </description>
+      <arg name="phase" type="uint" enum="phase"/>
+      <arg name="fingers" type="uint"/>
+      <arg name="scale" type="fixed"/>
+    </event>
+
+    <!-- Hot corners. -->
+
+    <enum name="corner">
+      <entry name="top_left" value="0"/>
+      <entry name="top_right" value="1"/>
+      <entry name="bottom_left" value="2"/>
+      <entry name="bottom_right" value="3"/>
+    </enum>
+
+    <enum name="modifier" bitfield="true">
+      <entry name="shift" value="1"/>
+      <entry name="control" value="2"/>
+      <entry name="alt" value="4"/>
+      <entry name="logo" value="8"/>
+    </enum>
+
+    <event name="corner">
+      <description summary="the pointer reached or left a screen corner">
+        The pointer is on the corner pixel of an output (entered 1) or left it (entered 0);
+        modifiers are the keys held at that moment. The compositor runs no corner action: the
+        Dock waits its own delay, picks the action of its settings (hotcorners.*) and toggles.
+        output is the connector name.
+      </description>
+      <arg name="output" type="string"/>
+      <arg name="corner" type="uint" enum="corner"/>
+      <arg name="entered" type="uint"/>
+      <arg name="modifiers" type="uint" enum="modifier"/>
+    </event>
+  </interface>
+
+  <interface name="silica_dock_node_v1" version="1">
+    <description summary="a window or a layer surface the Dock can place"/>
+
+    <request name="destroy" type="destructor">
+      <description summary="ends the overrides of this node">
+        The node shows where it is again (a request pending at the next commit is dropped).
+      </description>
+    </request>
+
+    <event name="closed">
+      <description summary="the window or surface is gone">
+        The Dock destroys the object. Requests on a closed node are ignored.
+      </description>
+    </event>
+
+    <event name="frame">
+      <description summary="where the node is">
+        The rectangle of the window frame (title bar and content, without the shadow) or of
+        the layer surface, in desktop coordinates (logical pixels), where the compositor puts
+        it, whatever the Dock placed it at. Sent at announcement and at every change.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+
+    <enum name="state" bitfield="true">
+      <entry name="minimized" value="1" summary="the window is minimized (without a placement the compositor shows nothing)"/>
+      <entry name="fullscreen" value="2" summary="the window is full screen"/>
+      <entry name="app_hidden" value="4" summary="its app is hidden (Hide, ⌘H)"/>
+      <entry name="focused" value="8" summary="the window has the keyboard focus"/>
+      <entry name="modal" value="16" summary="the window is a sheet or a dialog of another window"/>
+    </enum>
+
+    <event name="state">
+      <description summary="what the compositor knows about a window">
+        Sent at announcement and at every change; layer surfaces have no state (0).
+      </description>
+      <arg name="state" type="uint" enum="state"/>
+    </event>
+
+    <event name="output">
+      <description summary="the output the node is mostly on">
+        The connector name. Sent at announcement and when it changes.
+      </description>
+      <arg name="name" type="string"/>
+    </event>
+
+    <enum name="visibility">
+      <entry name="inherit" value="0" summary="as the compositor would show it"/>
+      <entry name="hidden" value="1" summary="not drawn, no pointer, no keyboard focus: another space"/>
+      <entry name="shown" value="2" summary="drawn even when minimized or its app is hidden (the minimize effect)"/>
+    </enum>
+
+    <request name="set_visibility">
+      <description summary="shows or hides the node">
+        Pending until commit. A hidden window that had the focus gives it up as if it had
+        closed; the Dock activates the window it wants.
+      </description>
+      <arg name="visibility" type="uint" enum="visibility"/>
+    </request>
+
+    <enum name="level">
+      <entry name="stack" value="0" summary="in the window stack, below the Top layer"/>
+      <entry name="above_top" value="1" summary="above the Top layer, below the Overlay layer (inside the Dock's spaces bar)"/>
+    </enum>
+
+    <request name="place">
+      <description summary="draws the node at a position, scale and opacity">
+        Pending until commit. The node is drawn (live) with its frame's top-left corner at x, y
+        (desktop coordinates, fractional), the whole frame scaled uniformly by scale (shadow
+        included) and faded to opacity (0 to 1). A clip rectangle with a positive size cuts what
+        is drawn to it (the thumbnail of a space in the bar). index numbers the placements of
+        the node, from 0: a window can be drawn several times (large in the arrangement, small
+        in the bar); placing an index again replaces it. While the node has a placement it is
+        drawn there and nowhere else. A window that is not visible is not drawn at all.
+
+        Placements are drawn in the window stack's order for the level stack, then the ones of
+        above_top, in the order of their nodes.
+      </description>
+      <arg name="index" type="uint"/>
+      <arg name="level" type="uint" enum="level"/>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+      <arg name="scale" type="fixed"/>
+      <arg name="opacity" type="fixed"/>
+      <arg name="clip_x" type="fixed"/>
+      <arg name="clip_y" type="fixed"/>
+      <arg name="clip_width" type="fixed"/>
+      <arg name="clip_height" type="fixed"/>
+    </request>
+
+    <request name="remove_placement">
+      <description summary="stops drawing the node at an index">
+        Pending until commit. Without placements the node is drawn where it is.
+      </description>
+      <arg name="index" type="uint"/>
+    </request>
+
+    <request name="warp">
+      <description summary="draws the node as a genie into a rectangle">
+        Pending until commit. The window is drawn deformed into the funnel of the minimize
+        effect towards the rectangle (desktop coordinates, the Dock cell), with the shape given
+        by bend, top and bottom (0 to 1 each: how bent the funnel is, how far the top and
+        bottom edges have come to the rectangle, 0 the window as it is, 1 inside the
+        rectangle). The Dock drives them frame by frame with the measured curves. The warp
+        replaces the placements while it lasts; the contents stay frozen at the first frame of
+        the warp. Combine with set_visibility shown for a window that is minimizing.
+      </description>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+      <arg name="width" type="fixed"/>
+      <arg name="height" type="fixed"/>
+      <arg name="bend" type="fixed"/>
+      <arg name="top" type="fixed"/>
+      <arg name="bottom" type="fixed"/>
+    </request>
+
+    <request name="activate">
+      <description summary="gives the window the focus and brings it to the front">
+        Applied at once, not at commit. As silica_shell_manager_v1.activate does for one window;
+        a window the Dock hid (another space) is shown first, and a minimized one comes back.
+        Through this node and not the shell manager so that it comes after the commit of the
+        same connection, in order.
+      </description>
+    </request>
+
+    <request name="clear_warp">
+      <description summary="stops warping the node">
+        Pending until commit.
+      </description>
+    </request>
+  </interface>
+</protocol>

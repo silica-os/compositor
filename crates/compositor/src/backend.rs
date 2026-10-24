@@ -157,6 +157,7 @@ impl State {
             animation_speed: speed,
             closing: &[],
             genies: &[],
+            dock: None,
             now,
             glass_quality,
             glass_level: self.theme_config.glass,
@@ -208,6 +209,7 @@ impl State {
         let context = RenderContext {
             closing: &self.closing,
             genies: &self.genies,
+            dock: Some(&self.dock),
             ..scene
         };
         let mut elements = output_elements(renderer, &self.space, &self.output, &context);
@@ -269,6 +271,7 @@ impl State {
         let context = RenderContext {
             closing: &self.closing,
             genies: &self.genies,
+            dock: Some(&self.dock),
             ..scene
         };
         let elements = output_elements(renderer, &self.space, &self.output, &context);

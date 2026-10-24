@@ -131,6 +131,57 @@ How an app presents its window to the compositor. Everything is per toplevel (th
   Dart: `SilicaWindow.setAppearance` (`silica/window` › `setAppearance {appearance}`), which
   `SilicaAppearanceScope` and `SilicaApp.appearance` of silica_ui call.
 
+## silica-dock-v1
+
+Reserved to the Dock (a shell component); one client holds the control at a time. On macOS the
+Dock app drives Spaces, Mission Control (Panorama), App Windows, Show Desktop, the hot corners
+and the minimize effect through WindowServer; this is the compositor's side of it: **primitives
+and reports, the Dock decides** (silica-os/compositor#10, silica-os/dock#2 and #3). Layer surfaces are nodes too, but only windows are
+placed for now (silica-os/compositor#15). Spec of the
+behaviour: silica-os/dock `docs/spec/spaces.md` and `panorama.md`.
+
+- `silica_dock_manager_v1.get_control` → `silica_dock_control_v1`. Every window (kind `window`,
+  key = its ext-foreign-toplevel identifier) and every layer surface (kind `layer`, key = its
+  namespace) is announced as a `silica_dock_node_v1` with its `frame` (desktop coordinates,
+  without shadow), `state` (minimized, fullscreen, app hidden, focused, modal), `output`, and
+  `closed` when it goes.
+- Requests on a node are pending until the control's `commit`, which applies all the nodes
+  together at the next repaint: `set_visibility` (inherit, hidden, shown), `place(index, level,
+  x, y, scale, opacity, clip…)`, `remove_placement`, `warp(target, bend, top, bottom)` and
+  `clear_warp`. `activate` acts at once (focus and raise, showing the window first if the
+  Dock hid it, restoring it if minimized).
+  - **hidden**: the window leaves the screen like a hidden app's: no drawing, no pointer, no
+    keyboard focus (the window below takes it), still in the shell's list; it comes back
+    where it was (`inherit`). Letting go of the control brings everything back.
+  - **place**: the live window drawn with its frame's top-left corner at (x, y), the whole
+    frame (shadow included) scaled by `scale`; a window can have several placements (indices
+    from 0: large in Panorama, small in the spaces bar); `level` `stack` is in the window
+    stack, `above_top` above the Top layer and below the Overlay layer (inside the bar). While
+    a node has a placement it is drawn there and nowhere else. v1 draws placements at whole
+    logical pixels, opaque and unclipped (`opacity` and the clip rectangle are accepted and
+    stored: silica-os/compositor#14), and without the glass and popups of the window.
+  - **warp**: the genie of the minimize effect, deformed by the Dock's `bend`, `top` and
+    `bottom` frame by frame into the target (a Dock cell), from the window's picture taken when
+    the warp began; above the Top layer, like the compositor's own genie was. The scale
+    effect is a `place` with a shrinking scale.
+- Minimizing and restoring with a Dock in charge: the compositor runs no effect. It takes the
+  window's picture, changes the state (`state` minimized) and **holds** the window for 250 ms:
+  a minimized window stays on screen, a restored one stays off it, until the Dock's first
+  commit touches its node, so that the effect starts on the first frame without a flash.
+- `set_swipe_fingers(3|4|0)`: swipes of that finger count come as `swipe` events (begin,
+  update, end with the totals) and no longer reach apps; pinches of four fingers or more
+  come as `pinch` events (scale below 1 closes: the launcher; above 1 opens: Show Desktop)
+  and the compositor no longer opens the launcher itself.
+- `corner(output, corner, entered, modifiers)`: the pointer reached (or left) the corner
+  pixel. No corner action runs in the compositor.
+- Shortcuts: the catalog commands `space.next`, `space.previous`, `panorama.toggle`,
+  `panorama.app` and `desktop.show` (Ctrl+Right, Ctrl+Left, Ctrl+Up, Ctrl+Down, F11) are
+  forwarded to the shell components with `silica_shell_manager_v1.command`, like
+  `faro.toggle`; the Dock answers them.
+- Input needs no request: while a view is open the Dock puts a full-screen surface on the
+  Overlay layer with exclusive keyboard interactivity, and it gets the pointer and the keys as
+  any layer surface does.
+
 ## silica-shell-v1 and the window list
 
 Reserved for the shell components: processes with `SILICA_SHELL=1` in the environment, which

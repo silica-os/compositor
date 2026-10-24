@@ -310,9 +310,16 @@ impl State {
             .ok_or("window not on screen")?;
         // The thumbnail for the Dock and the genie, while the window is still on screen.
         self.capture_thumbnail(window);
-        self.start_genie(window, false);
+        if self.dock.is_bound() {
+            // The Dock drives the effect: it gets the window's picture, and the window stays
+            // on screen for its first frame.
+            self.dock_capture(window);
+        } else {
+            self.start_genie(window, false);
+        }
         self.space.unmap_elem(window);
         self.minimized.push((window.clone(), location));
+        self.dock_hold(window, false);
         self.announce_minimized(window, true);
         let next = self.space.elements().last().cloned();
         self.focus_window(next);
@@ -328,8 +335,14 @@ impl State {
         let (window, location) = self.minimized.remove(index);
         self.announce_minimized(&window, false);
         self.space.map_element(window.clone(), location, true);
-        // It comes out of the Dock as a genie; until the genie ends the window stays hidden.
-        self.start_genie(&window, true);
+        if self.dock.is_bound() {
+            // The Dock drives the effect: the window stays off screen until its first frame.
+            self.dock_hold(&window, true);
+            self.dock_capture(&window);
+        } else {
+            // It comes out of the Dock as a genie; until the genie ends the window stays hidden.
+            self.start_genie(&window, true);
+        }
         true
     }
 

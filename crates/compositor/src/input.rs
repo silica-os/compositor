@@ -567,10 +567,10 @@ impl State {
                 self.pointer_axis(frame);
             }
             InputEvent::GestureSwipeBegin { event } => {
-                // Swipes go to the app under the pointer (pointer-gestures): those of spaces
-                // and Mission Control will belong to the Dock, as on macOS.
+                // Swipes go to the app under the pointer (pointer-gestures), except those of
+                // the Dock's finger count (spaces, Mission Control: the Dock decides).
                 let fingers = event.fingers();
-                self.protocols.client_gesture = true;
+                self.protocols.client_gesture = !self.dock.takes_swipe(fingers);
                 if self.protocols.client_gesture {
                     self.client_gesture(|state, pointer| {
                         pointer.gesture_swipe_begin(

@@ -265,62 +265,16 @@ impl InputConfig {
     }
 }
 
-// --- hotcorners.* -----------------------------------------------------------------------
+// --- hot corners ------------------------------------------------------------------------
 
-/// A corner of the output.
+/// A corner of the output. The compositor only reports the pointer on one (`silica-dock-v1`,
+/// `corner`): the Dock waits, picks the action of `hotcorners.*` and runs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Corner {
     TopLeft,
     TopRight,
     BottomLeft,
     BottomRight,
-}
-
-/// `hotcorners.json` (Settings › Desktop & Dock › Hot Corners): the catalog command each corner
-/// runs when the pointer reaches it. A corner left out does nothing.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct HotCornersConfig {
-    pub top_left: Option<&'static str>,
-    pub top_right: Option<&'static str>,
-    pub bottom_left: Option<&'static str>,
-    pub bottom_right: Option<&'static str>,
-}
-
-/// The command of a hot corner action name; `None` for `none` and unknown names.
-pub fn hot_corner_command(action: &str) -> Option<&'static str> {
-    use silica_control::commands as c;
-    Some(match action {
-        "notifications" => c::NOTIFICATIONS_TOGGLE,
-        "launcher" => c::LAUNCHER_TOGGLE,
-        "controlCenter" => c::CONTROLCENTER_TOGGLE,
-        "search" => c::FARO_TOGGLE,
-        _ => return None,
-    })
-}
-
-impl HotCornersConfig {
-    pub fn parse(map: Option<&serde_json::Map<String, Value>>) -> Self {
-        let action = |key: &str| {
-            map.and_then(|map| map.get(key))
-                .and_then(Value::as_str)
-                .and_then(hot_corner_command)
-        };
-        Self {
-            top_left: action("topLeft"),
-            top_right: action("topRight"),
-            bottom_left: action("bottomLeft"),
-            bottom_right: action("bottomRight"),
-        }
-    }
-
-    pub fn command(&self, corner: Corner) -> Option<&'static str> {
-        match corner {
-            Corner::TopLeft => self.top_left,
-            Corner::TopRight => self.top_right,
-            Corner::BottomLeft => self.bottom_left,
-            Corner::BottomRight => self.bottom_right,
-        }
-    }
 }
 
 // --- lockscreen.passwordDelay and screensaver.* ----------------------------------------------------
@@ -592,9 +546,6 @@ impl State {
         if touched("input.") {
             self.apply_input_config();
         }
-        if touched("hotcorners.") {
-            self.apply_hot_corners_config();
-        }
         if touched("shortcuts.") {
             self.apply_shortcuts_config();
         }
@@ -649,14 +600,8 @@ impl State {
         self.shortcuts = crate::commands::shortcuts_with(&overrides);
     }
 
-    /// `hotcorners.*`: the actions of the four corners.
-    pub fn apply_hot_corners_config(&mut self) {
-        self.hot_corners =
-            HotCornersConfig::parse(self.service_settings.object("hotcorners").as_ref());
-    }
-
-    /// The pointer moved to `location`: when it arrives in a corner with an action, runs it
-    /// (once; the corner is armed again after the pointer leaves it).
+    /// The pointer moved to `location`: when it arrives in a corner, or leaves one, the Dock
+    /// is told (the compositor runs no corner action).
     pub fn hot_corner_check(
         &mut self,
         location: smithay::utils::Point<f64, smithay::utils::Logical>,
@@ -693,12 +638,12 @@ impl State {
         if corner == self.hot_corner_inside {
             return;
         }
-        self.hot_corner_inside = corner;
-        if let Some(command) = corner.and_then(|c| self.hot_corners.command(c)) {
-            info!("hot corner: {command}");
-            if let Err(err) = self.execute_command(command, Value::Object(serde_json::Map::new())) {
-                warn!("hot corner {command}: {err}");
-            }
+        let before = std::mem::replace(&mut self.hot_corner_inside, corner);
+        if let Some(left) = before {
+            self.dock_corner(left, false);
+        }
+        if let Some(entered) = corner {
+            self.dock_corner(entered, true);
         }
     }
 
@@ -747,7 +692,6 @@ impl State {
         self.apply_input_config();
         self.apply_power_config();
         self.apply_theme_config();
-        self.apply_hot_corners_config();
         self.apply_shortcuts_config();
         self.apply_dock_config();
         self.apply_lock_config();
@@ -957,27 +901,6 @@ pub fn watch(handle: &LoopHandle<'static, Compositor>, dir: &Path) -> Result<(),
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn hot_corners_map_to_commands_and_ignore_the_rest() {
-        let parse = |json: &str| match serde_json::from_str::<Value>(json) {
-            Ok(Value::Object(map)) => HotCornersConfig::parse(Some(&map)),
-            _ => HotCornersConfig::parse(None),
-        };
-        let config = parse(
-            r#"{"topLeft": "launcher", "bottomRight": "notifications", "topRight": "panorama",
-                "bottomLeft": "rm -rf"}"#,
-        );
-        assert_eq!(config.command(Corner::TopLeft), Some("launcher.toggle"));
-        assert_eq!(
-            config.command(Corner::BottomRight),
-            Some("notifications.toggle")
-        );
-        // Mission Control belongs to the Dock.
-        assert_eq!(config.command(Corner::TopRight), None);
-        assert_eq!(config.command(Corner::BottomLeft), None);
-        assert_eq!(HotCornersConfig::parse(None), HotCornersConfig::default());
-    }
-
     #[test]
     fn theme_accessibility_flags_are_read() {
         let parse = |json: &str| match serde_json::from_str::<Value>(json) {

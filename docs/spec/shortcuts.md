@@ -8,7 +8,10 @@ PC keyboards often lack for window tiling; Silica binds those with Super instead
 
 ## Spaces, Panorama, Dock
 
-The Dock handles these, as on macOS; the compositor no longer binds them.
+The Dock handles these, as on macOS: the compositor binds the keys of the commands `space.next`,
+`space.previous`, `panorama.toggle`, `panorama.app` and `desktop.show` (Ctrl+Right, Ctrl+Left,
+Ctrl+Up, Ctrl+Down, F11) and forwards them to the shell components (`silica-dock-v1`, protocols.md);
+the other keys of this table (F9, F10, Super+Up/Down, Ctrl+1…9) are bindings of the Settings service.
 
 | Keys | Silica action | Default |
 |---|---|---|

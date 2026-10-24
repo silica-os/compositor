@@ -182,6 +182,7 @@ impl State {
     pub(crate) fn window_for(&self, surface: &WlSurface) -> Option<Window> {
         self.space
             .elements()
+            .chain(self.dock_hidden.windows())
             .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
             .cloned()
     }

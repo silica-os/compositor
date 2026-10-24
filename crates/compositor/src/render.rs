@@ -71,6 +71,8 @@ pub struct RenderContext<'a> {
     pub closing: &'a [Closing],
     /// Windows minimizing into the Dock or coming out of it.
     pub genies: &'a [Genie],
+    /// Windows the Dock places, warps or shows (`dock_control.rs`).
+    pub dock: Option<&'a crate::dock_control::DockControl>,
     pub now: Instant,
     pub glass_quality: GlassQuality,
     /// How tinted the glass is (Settings › Appearance › Glass, 0–1).
@@ -789,6 +791,38 @@ fn after_insert(index: usize, at: usize) -> usize {
 }
 
 /// The output elements, from the front to the back.
+/// The elements of a window the Dock places at `place`: the frame's top-left corner at
+/// (`place.x`, `place.y`), the whole frame scaled by `place.scale`.
+#[allow(clippy::too_many_arguments)]
+fn placed_elements(
+    renderer: &mut SilicaRenderer,
+    shaders: &compositor_render::Shaders,
+    window: &Window,
+    at: (Point<i32, Logical>, Rectangle<i32, Logical>),
+    place: &crate::dock_control::Placement,
+    output_origin: Point<i32, Logical>,
+    output_size: Size<i32, Physical>,
+    scale: f64,
+    dark: bool,
+) -> Vec<OutputElement> {
+    let frame = frame_rect(window, at.1);
+    let target = crate::dock_control::placement_rect(frame, place);
+    let (offset, factor) = fit(frame, target);
+    window_elements(
+        renderer,
+        shaders,
+        at,
+        window,
+        output_origin,
+        output_size,
+        scale,
+        offset,
+        factor,
+        ButtonsLook::default(),
+        dark,
+    )
+}
+
 pub fn output_elements(
     renderer: &mut SilicaRenderer,
     space: &Space<Window>,
@@ -937,6 +971,33 @@ pub fn output_elements(
             dark_from: None,
         });
     }
+    // The windows the Dock draws inside its spaces bar: above the Top layer, below the Overlay
+    // layer with the bar's rings and buttons.
+    for drawn in context.dock.map_or(&[][..], |d| &d.drawn[..]) {
+        let at = match drawn.location {
+            Some(location) => (
+                location,
+                Rectangle::new(location, drawn.window.geometry().size),
+            ),
+            None => match placed(space, &drawn.window) {
+                Some(at) => at,
+                None => continue,
+            },
+        };
+        for place in drawn.places.iter().filter(|p| p.above_top) {
+            elements.extend(placed_elements(
+                renderer,
+                &shaders,
+                &drawn.window,
+                at,
+                place,
+                output_origin,
+                output_size,
+                scale,
+                context.dark,
+            ));
+        }
+    }
     let top_start = elements.len();
     push_layers(&mut elements, &mut anchors, renderer, Layer::Top);
 
@@ -1020,13 +1081,120 @@ pub fn output_elements(
         }
     }
 
+    // Windows the Dock warps as a genie, frame by frame (the minimize effect): from the
+    // snapshot taken when the warp began, above the Top layer like the compositor's own genies.
+    if let Some(dock) = context.dock {
+        for drawn in &dock.drawn {
+            let (Some(warp), Some(snapshot)) = (drawn.warp, dock.snapshot_of(&drawn.window)) else {
+                continue;
+            };
+            let mut target = warp.target;
+            target.loc -= output_origin.to_f64();
+            if let Some(element) =
+                compositor_render::genie::GenieElement::new(compositor_render::genie::GenieParts {
+                    id: snapshot.id.clone(),
+                    commit: snapshot.next_commit(),
+                    context_id: context_id.clone(),
+                    texture: snapshot.texture.clone(),
+                    snapshot: snapshot.bbox,
+                    window: snapshot.frame,
+                    target: target.to_physical(scale),
+                    shape: animation::GenieShape {
+                        bend: warp.bend,
+                        top: warp.top,
+                        bottom: warp.bottom,
+                    },
+                    output: output_size,
+                    program: genie_program,
+                })
+            {
+                elements.insert(top_start, OutputElement::Genie(element));
+                for anchor in &mut anchors {
+                    anchor.index = after_insert(anchor.index, top_start);
+                }
+            }
+        }
+    }
+
     // Windows with a sheet (a modal dialog of theirs on screen) are veiled under it.
     let veiled: Vec<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> = space
         .elements()
         .filter(|w| crate::windows::is_modal(w))
         .filter_map(crate::windows::parent_of)
         .collect();
+    // Windows the Dock shows although they are off the space (minimizing, or placed while
+    // minimized), above the others.
+    for drawn in context
+        .dock
+        .map_or(&[][..], |d| &d.drawn[..])
+        .iter()
+        .filter(|d| d.location.is_some())
+    {
+        let Some(location) = drawn.location else {
+            continue;
+        };
+        let at = (
+            location,
+            Rectangle::new(location, drawn.window.geometry().size),
+        );
+        // Shown without a placement (just minimized, held for the Dock): where it was.
+        if drawn.places.iter().all(|p| p.above_top) && drawn.warp.is_none() && !drawn.veil {
+            elements.extend(window_elements(
+                renderer,
+                &shaders,
+                at,
+                &drawn.window,
+                output_origin,
+                output_size,
+                scale,
+                Point::default(),
+                1.0,
+                ButtonsLook::default(),
+                context.dark,
+            ));
+        }
+        for place in drawn.places.iter().filter(|p| !p.above_top) {
+            elements.extend(placed_elements(
+                renderer,
+                &shaders,
+                &drawn.window,
+                at,
+                place,
+                output_origin,
+                output_size,
+                scale,
+                context.dark,
+            ));
+        }
+    }
     for window in space.elements().rev() {
+        // A window the Dock places is drawn where it says, and nowhere else.
+        if let Some(drawn) = context
+            .dock
+            .and_then(|d| d.drawn.iter().find(|d| &d.window == window))
+            && drawn.location.is_none()
+            && (drawn.veil || drawn.warp.is_some() || drawn.places.iter().any(|p| !p.above_top))
+        {
+            if drawn.warp.is_none()
+                && !drawn.veil
+                && let Some(at) = placed(space, window)
+            {
+                for place in drawn.places.iter().filter(|p| !p.above_top) {
+                    elements.extend(placed_elements(
+                        renderer,
+                        &shaders,
+                        window,
+                        at,
+                        place,
+                        output_origin,
+                        output_size,
+                        scale,
+                        context.dark,
+                    ));
+                }
+            }
+            continue;
+        }
         // A window coming out of the Dock shows only in the genie, until the end.
         if context.genies.iter().any(|genie| genie.hides(window)) {
             continue;

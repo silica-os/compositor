@@ -179,11 +179,11 @@ the saver to the shell as `screensaver.active` (its id, empty when none) and any
 
 ### hotcorners.*
 
-`hotcorners.topLeft`, `hotcorners.topRight`, `hotcorners.bottomLeft`, `hotcorners.bottomRight`:
-the action the compositor runs once when the pointer arrives in that corner (it is armed again after the
-pointer leaves): `notifications` (`notifications.toggle`), `launcher` (`launcher.toggle`),
-`controlCenter` (`controlcenter.toggle`), `search` (`faro.toggle`); `none` (the default) does
-nothing. Dragging or resizing a window into a corner does not trigger it.
+`hotcorners.topLeft`, `hotcorners.topRight`, `hotcorners.bottomLeft`, `hotcorners.bottomRight`
+(and their `.modifiers`): read by the **Dock**, not the compositor. The compositor only reports
+the pointer reaching or leaving a corner (`silica-dock-v1`, `corner`, protocols.md); the Dock
+waits its own delay, runs the action and toggles it back on the next visit. Dragging or
+resizing a window into a corner does not report it.
 
 ### dock.titleBarDoubleClick and dock.minimizeToApp
 

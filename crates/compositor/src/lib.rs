@@ -18,6 +18,7 @@ mod desktop_entry;
 pub mod display_layout;
 mod displays;
 mod dmabuf;
+mod dock_control;
 #[cfg(feature = "drm")]
 mod drm;
 mod egl;
@@ -247,6 +248,8 @@ pub fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run(None, &mut compositor, |compositor| {
         compositor.state.space.refresh();
         compositor.state.popups.cleanup();
+        // The Dock (silica-dock-v1) learns what changed in the windows and layers.
+        compositor.state.dock_sync();
         if let Err(err) = compositor.display.flush_clients() {
             warn!("client flush failed: {err}");
         }

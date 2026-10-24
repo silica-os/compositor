@@ -1,5 +1,7 @@
 //! Trackpad gestures (M5.6): pinching with thumb and three fingers opens the launcher. The
-//! gestures of spaces and Mission Control belong to the Dock, as on macOS.
+//! gestures of spaces and Mission Control belong to the Dock, as on macOS: while a Dock holds
+//! the control (`silica-dock-v1`) it gets the swipes of its finger count and every pinch of
+//! four fingers or more, and decides; without one the compositor opens the launcher itself.
 //!
 //! Provisional logic: the threshold waits for the PA-20…PA-22 measurements. Here the gesture is
 //! decided at the end, like a shortcut. They come from libinput events or from `input.gesture`.
@@ -55,24 +57,40 @@ impl State {
             dy: 0.0,
             scale: 1.0,
         });
+        self.dock_gesture(kind, 0, fingers, 0.0, 0.0, 1.0);
     }
 
     /// Movement (swipe) or absolute scale (pinch) since the start of the gesture.
     pub fn gesture_update(&mut self, dx: f64, dy: f64, scale: Option<f64>) {
-        if let Some(gesture) = self.gesture.as_mut() {
-            if dx.is_finite() && dy.is_finite() {
-                gesture.dx += dx;
-                gesture.dy += dy;
-            }
-            if let Some(scale) = scale.filter(|s| s.is_finite()) {
-                gesture.scale = scale;
-            }
+        let Some(gesture) = self.gesture.as_mut() else {
+            return;
+        };
+        if dx.is_finite() && dy.is_finite() {
+            gesture.dx += dx;
+            gesture.dy += dy;
         }
+        if let Some(scale) = scale.filter(|s| s.is_finite()) {
+            gesture.scale = scale;
+        }
+        let g = *gesture;
+        self.dock_gesture(g.kind, 1, g.fingers, g.dx, g.dy, g.scale);
     }
 
     /// End of the gesture: runs its command (unless cancelled) and returns it.
     pub fn gesture_end(&mut self, cancelled: bool) -> Option<&'static str> {
         let gesture = self.gesture.take()?;
+        // A Dock that took the gesture decides; the compositor does nothing more.
+        let phase = if cancelled { 3 } else { 2 };
+        if self.dock_gesture(
+            gesture.kind,
+            phase,
+            gesture.fingers,
+            gesture.dx,
+            gesture.dy,
+            gesture.scale,
+        ) {
+            return None;
+        }
         if cancelled {
             return None;
         }
