@@ -199,6 +199,8 @@ impl State {
         else {
             return;
         };
+        // The CPU renderer's workers stay awake until the frame is drawn.
+        let _warm = renderer.cpu().map(|cpu| cpu.warm());
         if let (Some(timer), Some(gles)) = (&mut frames.timer, renderer.gles()) {
             timer.begin(gles);
         }

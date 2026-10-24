@@ -1348,6 +1348,8 @@ impl State {
         let Backend::Drm(backend) = &mut self.backend else {
             return;
         };
+        // The CPU renderer's workers stay awake until the frame is queued.
+        let _warm = backend.renderer.cpu().map(|cpu| cpu.warm());
         // Locked: black behind the lock surface, and the plain screen if the locker is gone.
         let clear_color = if lock_surfaces.is_some() {
             [0.0, 0.0, 0.0, 1.0]

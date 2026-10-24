@@ -12,7 +12,9 @@ mod kernels;
 mod memory;
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use smithay::backend::allocator::dmabuf::{
@@ -41,6 +43,21 @@ use exec::{DisplayList, Map, Op};
 
 /// Workers at most: past four, a 1280 × 800 frame waits on memory, not on the cores.
 const MAX_THREADS: usize = 4;
+
+/// The longest the workers stay awake for one `warm`, should its guard never be dropped.
+const MAX_WARM: Duration = Duration::from_millis(50);
+
+/// Keeps the renderer's workers awake while it lives (see [`CpuRenderer::warm`]).
+#[must_use = "the workers sleep again when the guard is dropped"]
+pub struct Warm(Option<Arc<AtomicBool>>);
+
+impl Drop for Warm {
+    fn drop(&mut self) {
+        if let Some(awake) = &self.0 {
+            awake.store(false, Ordering::Release);
+        }
+    }
+}
 
 /// An image the renderer reads from and draws into, shared between its users.
 #[derive(Clone)]
@@ -349,6 +366,31 @@ impl CpuRenderer {
     /// workers when there is enough of it: the effects' own passes.
     pub fn rows<T: Send>(&self, data: &mut [T], width: usize, f: impl Fn(usize, &mut [T]) + Sync) {
         exec::rows(self.pool.as_ref(), data, width, f);
+    }
+
+    /// Wakes the workers and keeps them waiting for work, spinning, until the guard is dropped:
+    /// held over a frame, its passes start at once instead of waiting each time for sleeping
+    /// cores to wake up, which costs more than a small pass itself.
+    pub fn warm(&self) -> Warm {
+        let Some(pool) = &self.pool else {
+            return Warm(None);
+        };
+        let awake = Arc::new(AtomicBool::new(true));
+        let flag = Arc::clone(&awake);
+        let until = Instant::now() + MAX_WARM;
+        pool.spawn_broadcast(move |_| {
+            while flag.load(Ordering::Acquire) && Instant::now() < until {
+                if rayon::yield_now() != Some(rayon::Yield::Executed) {
+                    std::hint::spin_loop();
+                }
+            }
+        });
+        Warm(Some(awake))
+    }
+
+    /// The kernels, for effects that draw with them.
+    pub fn kernels(&self) -> Kernels {
+        self.kernels
     }
 
     /// The SIMD level of the kernels, for effects that `dispatch!` their own loops.

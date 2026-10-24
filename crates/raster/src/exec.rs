@@ -4,10 +4,9 @@
 use std::cell::RefCell;
 use std::fmt;
 use std::ops::Range;
-use std::sync::{Arc, RwLockReadGuard, TryLockError};
+use std::sync::{Arc, Mutex, PoisonError, RwLockReadGuard, TryLockError};
 
 use rayon::ThreadPool;
-use rayon::prelude::*;
 use smithay::backend::renderer::TextureFilter;
 
 use crate::CpuTexture;
@@ -199,18 +198,8 @@ impl DisplayList {
             self.run_band(&mut band, &sources);
         };
         let work: u64 = self.rects.iter().map(|r| r.area()).sum();
-        match pool {
-            Some(pool) if work >= PARALLEL_PIXELS => pool.install(|| {
-                pixels
-                    .par_chunks_mut(BAND_ROWS * width)
-                    .enumerate()
-                    .for_each(band);
-            }),
-            _ => pixels
-                .chunks_mut(BAND_ROWS * width)
-                .enumerate()
-                .for_each(band),
-        }
+        let pool = pool.filter(|_| work >= PARALLEL_PIXELS);
+        bands(pool, pixels, BAND_ROWS * width, band);
     }
 
     /// The rows the commands touch, within `0..height`.
@@ -331,17 +320,42 @@ pub(crate) fn rows_from<T: Send>(
             f(i * band_rows + j, row);
         }
     };
-    match pool {
-        Some(pool) if data.len() as u64 >= parallel => pool.install(|| {
-            data.par_chunks_mut(band_rows * width)
-                .enumerate()
-                .for_each(band);
-        }),
-        _ => data
-            .chunks_mut(band_rows * width)
-            .enumerate()
-            .for_each(band),
-    }
+    let pool = pool.filter(|_| data.len() as u64 >= parallel);
+    bands(pool, data, band_rows * width, band);
+}
+
+/// Runs `f` on every `len` items of `data` with the band's index, on the `pool`'s workers and
+/// on the calling thread together: each takes the next band until none is left. The caller
+/// never waits for a worker to wake up before the work starts; it only waits at the end for
+/// the bands that workers are still drawing.
+fn bands<T: Send>(
+    pool: Option<&ThreadPool>,
+    data: &mut [T],
+    len: usize,
+    f: impl Fn((usize, &mut [T])) + Sync,
+) {
+    let chunks = data.chunks_mut(len.max(1)).enumerate();
+    let Some(pool) = pool.filter(|_| chunks.len() > 1) else {
+        chunks.for_each(f);
+        return;
+    };
+    let chunks = Mutex::new(chunks);
+    let work = || {
+        loop {
+            let next = chunks.lock().unwrap_or_else(PoisonError::into_inner).next();
+            let Some(band) = next else {
+                break;
+            };
+            f(band);
+        }
+    };
+    let work = &work;
+    pool.in_place_scope(|scope| {
+        for _ in 0..pool.current_num_threads() {
+            scope.spawn(move |_| work());
+        }
+        work();
+    });
 }
 
 thread_local! {
