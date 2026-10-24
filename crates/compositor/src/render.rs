@@ -88,6 +88,8 @@ pub struct RenderContext<'a> {
     /// The menu bar's surfaces and where they are in the output (#12); empty while the strip
     /// is not on screen.
     pub menu_bar: Vec<(WlSurface, Point<i32, Logical>)>,
+    /// The front window is full screen: the Dock steps aside, as the menu bar does.
+    pub dock_hidden: bool,
 }
 
 /// The veil over the window to capture (K-05): `#88bae7` at alpha ~0.51, premultiplied.
@@ -916,6 +918,9 @@ pub fn output_elements(
                        renderer: &mut SilicaRenderer,
                        level| {
         for layer in layer_map.layers_on(level).rev() {
+            if context.dock_hidden && crate::layers::is_dock(layer) {
+                continue;
+            }
             // Not before its first frame at the configured size (the Dock in the middle of
             // the screen at session start), and where its buffer fits while it resizes.
             let Some(drawn) = crate::layers::drawn_layer(&layer_map, layer, layers_output) else {

@@ -160,12 +160,15 @@ impl State {
     /// Whether the strip is on screen: someone has a part in it and no window is full screen
     /// in front.
     pub fn menu_bar_visible(&self) -> bool {
-        self.menu_bar.active()
-            && !self
-                .space
-                .elements()
-                .last()
-                .is_some_and(crate::windows::is_fullscreen)
+        self.menu_bar.active() && !self.front_is_fullscreen()
+    }
+
+    /// The front window is full screen: the menu bar and the Dock step aside.
+    pub fn front_is_fullscreen(&self) -> bool {
+        self.space
+            .elements()
+            .last()
+            .is_some_and(crate::windows::is_fullscreen)
     }
 
     fn output_width(&self) -> i32 {

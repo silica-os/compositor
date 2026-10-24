@@ -77,6 +77,11 @@ fn fits(layer: &LayerSurface) -> bool {
     matches!((configured, drawn), (Some(configured), Some(drawn)) if configured == drawn)
 }
 
+/// The Dock's layer (namespace `dock`).
+pub fn is_dock(layer: &LayerSurface) -> bool {
+    layer.namespace() == "dock"
+}
+
 /// Where and how a layer is drawn on an output of `output` logical size, `None` if it must not
 /// be drawn yet.
 ///
@@ -348,8 +353,12 @@ impl State {
         // The input region counts, not the rectangle: a hidden shell component (a closed
         // Faro) is transparent and full screen but with an empty region. A layer not shown yet
         // takes no input; one resizing takes it where it is drawn.
+        let dock_hidden = self.front_is_fullscreen();
         layers.iter().find_map(|level| {
             map.layers_on(*level).rev().find_map(|layer| {
+                if dock_hidden && is_dock(layer) {
+                    return None;
+                }
                 let drawn = drawn_layer(&map, layer, output.size)?;
                 let local = pos - (drawn.loc + origin).to_f64();
                 layer
