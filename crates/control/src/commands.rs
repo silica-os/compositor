@@ -83,6 +83,11 @@ pub const SYSTEM_STATUS: &str = "system.status";
 /// compositor forwards these to it (`silica-shell-v1` `command`) and does nothing else.
 pub const SPACE_NEXT: &str = "space.next";
 pub const SPACE_PREVIOUS: &str = "space.previous";
+/// Go to space N (Ctrl+N), the first nine.
+pub const SPACE_GO: [&str; 9] = [
+    "space.1", "space.2", "space.3", "space.4", "space.5", "space.6", "space.7", "space.8",
+    "space.9",
+];
 pub const PANORAMA_TOGGLE: &str = "panorama.toggle";
 pub const PANORAMA_APP: &str = "panorama.app";
 pub const DESKTOP_SHOW: &str = "desktop.show";
@@ -452,6 +457,69 @@ pub const CATALOG: &[CommandSpec] = &[
         label: "Previous space",
         description: "Moves to the space on the left (does nothing before the first one) (Dock).",
         shortcut: Some("Ctrl+Left"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_GO[0],
+        label: "Space 1",
+        description: "Moves to space 1, if there is one (Dock).",
+        shortcut: Some("Ctrl+1"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_GO[1],
+        label: "Space 2",
+        description: "Moves to space 2, if there is one (Dock).",
+        shortcut: Some("Ctrl+2"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_GO[2],
+        label: "Space 3",
+        description: "Moves to space 3, if there is one (Dock).",
+        shortcut: Some("Ctrl+3"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_GO[3],
+        label: "Space 4",
+        description: "Moves to space 4, if there is one (Dock).",
+        shortcut: Some("Ctrl+4"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_GO[4],
+        label: "Space 5",
+        description: "Moves to space 5, if there is one (Dock).",
+        shortcut: Some("Ctrl+5"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_GO[5],
+        label: "Space 6",
+        description: "Moves to space 6, if there is one (Dock).",
+        shortcut: Some("Ctrl+6"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_GO[6],
+        label: "Space 7",
+        description: "Moves to space 7, if there is one (Dock).",
+        shortcut: Some("Ctrl+7"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_GO[7],
+        label: "Space 8",
+        description: "Moves to space 8, if there is one (Dock).",
+        shortcut: Some("Ctrl+8"),
+        params: no_params,
+    },
+    CommandSpec {
+        id: SPACE_GO[8],
+        label: "Space 9",
+        description: "Moves to space 9, if there is one (Dock).",
+        shortcut: Some("Ctrl+9"),
         params: no_params,
     },
     CommandSpec {

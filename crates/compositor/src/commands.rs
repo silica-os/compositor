@@ -33,8 +33,9 @@ use silica_control::commands::{
     SYSTEM_VOLUME_DOWN_FINE, SYSTEM_VOLUME_UP, SYSTEM_VOLUME_UP_FINE, SYSTEM_WIFI, ValueParams,
 };
 use silica_control::commands::{
-    DESKTOP_SHOW, LAUNCHER_TOGGLE, PANORAMA_APP, PANORAMA_TOGGLE, SPACE_NEXT, SPACE_PREVIOUS,
-    SWITCHER_CANCEL, SWITCHER_COMMIT, SWITCHER_EXPOSE, SWITCHER_NEXT, SWITCHER_PREVIOUS,
+    DESKTOP_SHOW, LAUNCHER_TOGGLE, PANORAMA_APP, PANORAMA_TOGGLE, SPACE_GO, SPACE_NEXT,
+    SPACE_PREVIOUS, SWITCHER_CANCEL, SWITCHER_COMMIT, SWITCHER_EXPOSE, SWITCHER_NEXT,
+    SWITCHER_PREVIOUS,
 };
 use silica_control::commands::{
     DOCK_ICONS, DockIconsParams, MinimizeEffectParams, WINDOW_MINIMIZE_EFFECT,
@@ -340,6 +341,10 @@ impl State {
                 self.dismiss_transients();
                 let sent = self.forward_to_shell(id);
                 Ok(json!({ "forwarded": sent }))
+            }
+            id if SPACE_GO.contains(&id) => {
+                self.dismiss_transients();
+                Ok(json!({ "forwarded": self.forward_to_shell(id) }))
             }
             WINDOW_FOCUS => {
                 let target: WindowTarget = parse(params)?;
