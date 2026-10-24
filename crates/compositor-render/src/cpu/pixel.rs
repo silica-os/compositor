@@ -1,6 +1,7 @@
 //! The pixel programs (`shadow.frag`, `border.frag`, `titlebar.frag`) on the CPU: the color
 //! at a point of the element's area, painted once into a texture.
 
+use compositor_raster::fearless_simd::{Simd, dispatch};
 use compositor_raster::{CpuRenderer, Image};
 use smithay::backend::renderer::gles::Uniform;
 
@@ -43,12 +44,27 @@ impl PixelProgram {
     pub fn paint(&self, renderer: &CpuRenderer, size: [f32; 2], src: [f32; 4], image: &mut Image) {
         let (w, h) = (image.width(), image.height());
         let (kx, ky) = (src[2] / w as f32, src[3] / h as f32);
+        let level = renderer.level();
         renderer.rows_costly(image.pixels_mut(), w, |y, row| {
             let py = src[1] + (y as f32 + 0.5) * ky;
-            for (x, out) in row.iter_mut().enumerate() {
-                *out = pack(self.color([src[0] + (x as f32 + 0.5) * kx, py], size));
-            }
+            dispatch!(level, simd => self.paint_row(simd, size, (src[0], kx), py, row));
         });
+    }
+
+    /// A row of `paint` at `py`, from `x0` in steps of `kx` points, compiled for the SIMD level
+    /// of `S`.
+    #[inline(always)]
+    fn paint_row<S: Simd>(
+        &self,
+        _: S,
+        size: [f32; 2],
+        (x0, kx): (f32, f32),
+        py: f32,
+        row: &mut [u32],
+    ) {
+        for (x, out) in row.iter_mut().enumerate() {
+            *out = pack(self.color([x0 + (x as f32 + 0.5) * kx, py], size));
+        }
     }
 }
 

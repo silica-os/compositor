@@ -71,7 +71,7 @@ pub(crate) fn unpack(p: u32) -> [f32; 4] {
 /// RGBA in 0–1 (premultiplied) as a pixel, rounded as a unorm8 target stores it.
 #[inline]
 pub(crate) fn pack([r, g, b, a]: [f32; 4]) -> u32 {
-    let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as i32 as u32;
     (c(a) << 24) | (c(r) << 16) | (c(g) << 8) | c(b)
 }
 

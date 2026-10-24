@@ -100,7 +100,7 @@ fn across(
         return out;
     }
     let reach = weights.len() / 2;
-    renderer.rows(&mut out.px, w * 4, |y, out| {
+    renderer.rows_costly(&mut out.px, w * 4, |y, out| {
         SCRATCH.with_borrow_mut(|line| {
             line.clear();
             line.resize((w + 2 * reach) * 4, 0.0);
@@ -133,7 +133,7 @@ fn down(renderer: &CpuRenderer, src: &Plane, weights: &[f32], quantize: bool) ->
     if src.w == 0 || src.h == 0 {
         return out;
     }
-    renderer.rows(&mut out.px, src.w * 4, |y, out| {
+    renderer.rows_costly(&mut out.px, src.w * 4, |y, out| {
         let y = y as isize;
         convolve(out, weights, quantize, |k| {
             (src.row(y - k as isize), src.row(y + k as isize))
@@ -180,7 +180,7 @@ fn downsample(
         })
         .collect();
     let pixels = src.pixels();
-    renderer.rows(&mut out.px, small.0 * 4, |y, out| {
+    renderer.rows_costly(&mut out.px, small.0 * 4, |y, out| {
         SCRATCH.with_borrow_mut(|sum| {
             // The `factor` source rows summed, in 0–255.
             sum.clear();
@@ -234,6 +234,7 @@ fn taps(pixels: usize, size: usize, offset: f32, step: f32) -> Vec<(usize, usize
 
 /// A separable Gaussian of σ `sigma` pixels over `sharp` at 1/`factor` of the resolution, back
 /// at full size with the sharp share `sharp_share` under it: `glass::blur` on the CPU.
+#[cfg(test)]
 pub(crate) fn blur(
     renderer: &CpuRenderer,
     sharp: &Image,
@@ -242,9 +243,25 @@ pub(crate) fn blur(
     sharp_share: f32,
     edge: BlurEdge,
 ) -> Image {
+    let all = [0, 0, sharp.width(), sharp.height()];
+    blur_area(renderer, sharp, (sigma, factor, sharp_share), edge, all)
+}
+
+/// `blur`, made only over `area` (`[x0, y0, x1, y1)`), transparent elsewhere: the pixels
+/// someone reads.
+pub(crate) fn blur_area(
+    renderer: &CpuRenderer,
+    sharp: &Image,
+    (sigma, factor, sharp_share): (f64, u32, f32),
+    edge: BlurEdge,
+    area: [usize; 4],
+) -> Image {
     let (w, h) = (sharp.width(), sharp.height());
     let mut out = Image::new(w, h);
-    if w == 0 || h == 0 {
+    let [x0, y0, x1, y1] = area;
+    let (x0, y0) = (x0.min(w), y0.min(h));
+    let (x1, y1) = (x1.clamp(x0, w), y1.clamp(y0, h));
+    if x0 == x1 || y0 == y1 {
         return out;
     }
     let pixels = sharp.pixels();
@@ -278,29 +295,31 @@ pub(crate) fn blur(
     let alpha = 1.0 - sharp_share;
     let columns = taps(w, blurred.w, offset, step);
     let rows = taps(h, blurred.h, offset, step);
-    renderer.rows(out.pixels_mut(), w, |y, row| {
-        let Some(&(y0, y1, fy)) = rows.get(y) else {
+    let columns = columns.get(x0..x1).unwrap_or_default();
+    let band = out.pixels_mut().get_mut(y0 * w..y1 * w).unwrap_or_default();
+    renderer.rows_costly(band, w, |y, row| {
+        let y = y + y0;
+        let Some(&(r0, r1, fy)) = rows.get(y) else {
             return;
         };
+        let row = row.get_mut(x0..x1).unwrap_or_default();
         SCRATCH.with_borrow_mut(|line| {
             // The two rows around the pixel centre, mixed: the vertical half of the bilinear.
             line.clear();
             line.extend(
                 blurred
-                    .row(y0 as isize)
+                    .row(r0 as isize)
                     .iter()
-                    .zip(blurred.row(y1 as isize))
+                    .zip(blurred.row(r1 as isize))
                     .map(|(a, b)| a + (b - a) * fy),
             );
-            let sharp = pixels.get(y * w..(y + 1) * w).unwrap_or_default();
-            for ((o, &(x0, x1, fx)), s) in row.iter_mut().zip(&columns).zip(sharp) {
-                let (a, b, s) = (texel(line, x0), texel(line, x1), unpack(*s));
-                let mut p = zip_with(a, b, |a, b| (a + (b - a) * fx) * alpha);
+            let sharp = pixels.get(y * w + x0..y * w + x1).unwrap_or_default();
+            let line = line.as_chunks::<4>().0;
+            let at = |x: usize| line.get(x).copied().unwrap_or_default();
+            for ((o, &(c0, c1, fx)), s) in row.iter_mut().zip(columns).zip(sharp) {
+                let p = zip_with(at(c0), at(c1), |a, b| (a + (b - a) * fx) * alpha);
                 let k = 1.0 - p[3];
-                for (p, s) in p.iter_mut().zip(s) {
-                    *p += s * k;
-                }
-                *o = pack(p);
+                *o = pack(zip_with(p, unpack(*s), |p, s| p + s * k));
             }
         });
     });

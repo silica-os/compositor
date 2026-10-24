@@ -32,8 +32,10 @@ use smithay::wayland::compositor::SurfaceData;
 use smithay::wayland::shm::{BufferAccessError, shm_format_to_fourcc};
 
 pub use exec::{Band, Effect, Shader};
+/// The SIMD crate of the kernels, for effects that `dispatch!` their own loops.
+pub use fearless_simd;
 pub use image::{FORMATS, Image, Layout, Rect};
-pub use kernels::Kernels;
+pub use kernels::{Kernels, Walk};
 
 use exec::{DisplayList, Map, Op};
 
@@ -347,6 +349,11 @@ impl CpuRenderer {
     /// workers when there is enough of it: the effects' own passes.
     pub fn rows<T: Send>(&self, data: &mut [T], width: usize, f: impl Fn(usize, &mut [T]) + Sync) {
         exec::rows(self.pool.as_ref(), data, width, f);
+    }
+
+    /// The SIMD level of the kernels, for effects that `dispatch!` their own loops.
+    pub fn level(&self) -> fearless_simd::Level {
+        self.kernels.level()
     }
 
     /// `rows` for work of tens of nanoseconds per item (a shader run per pixel): on the

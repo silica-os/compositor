@@ -5,6 +5,8 @@
 //!
 //! Every division by 255 rounds to nearest, as a unorm8 GPU blend does.
 
+use std::cell::RefCell;
+
 use fearless_simd::{Level, Simd, dispatch};
 
 use crate::image::Image;
@@ -103,6 +105,16 @@ impl Kernels {
         }
     }
 
+    /// The SIMD level, for `fearless_simd::dispatch!`.
+    pub fn level(self) -> Level {
+        self.level
+    }
+
+    /// `dst` sampled from `src` along `walk`, bilinear (`sample_bilinear`).
+    pub fn bilinear(self, src: &Image, walk: Walk, dst: &mut [u32]) {
+        dispatch!(self.level, simd => bilinear_row(simd, src, walk, dst));
+    }
+
     pub fn fill(self, dst: &mut [u32], color: u32) {
         dst.fill(color);
     }
@@ -148,6 +160,25 @@ pub struct Walk {
     pub dv: i64,
 }
 
+impl Walk {
+    /// The walk from `(u, v)` by `(du, dv)` per pixel, in texels.
+    pub fn new([u, v]: [f64; 2], [du, dv]: [f64; 2]) -> Self {
+        Self {
+            u: fixed(u),
+            v: fixed(v),
+            du: fixed(du),
+            dv: fixed(dv),
+        }
+    }
+}
+
+/// 16.16 fixed point, saturating far outside any texture.
+pub(crate) fn fixed(v: f64) -> i64 {
+    (v * 65536.0)
+        .round()
+        .clamp(-(1i64 << 46) as f64, (1i64 << 46) as f64) as i64
+}
+
 /// One texel per pixel, the nearest, clamped to the image's edges.
 pub fn sample_nearest(src: &Image, walk: Walk, dst: &mut [u32]) {
     let (w, h) = (src.width() as i64, src.height() as i64);
@@ -166,8 +197,98 @@ pub fn sample_nearest(src: &Image, walk: Walk, dst: &mut [u32]) {
     }
 }
 
+/// `sample_bilinear` compiled for the SIMD level of `S`.
+#[inline(always)]
+fn bilinear_row<S: Simd>(_: S, src: &Image, walk: Walk, dst: &mut [u32]) {
+    if walk.dv == 0 {
+        let done = MIXED.try_with(|mixed| {
+            let Ok(mut mixed) = mixed.try_borrow_mut() else {
+                return false;
+            };
+            sample_bilinear_across(src, walk, dst, &mut mixed);
+            true
+        });
+        if done == Ok(true) {
+            return;
+        }
+    }
+    sample_bilinear(src, walk, dst);
+}
+
+thread_local! {
+    /// The texture row that `sample_bilinear_across` mixes, kept between calls.
+    static MIXED: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `sample_bilinear` along a texture row (`dv` 0, as for scaling): the two texture rows are
+/// mixed once over the columns the walk reaches, and each pixel then mixes two neighbours of
+/// that mix. The weights are the same; only the order of the steps differs.
+#[inline(always)]
+fn sample_bilinear_across(src: &Image, walk: Walk, dst: &mut [u32], mixed: &mut Vec<u32>) {
+    let (w, h) = (src.width() as i64, src.height() as i64);
+    let Some(last) = dst.len().checked_sub(1) else {
+        return;
+    };
+    if w == 0 || h == 0 {
+        dst.fill(0);
+        return;
+    }
+    let pixels = src.pixels();
+    let row = |y: i64| {
+        let start = (y.clamp(0, h - 1) * w) as usize;
+        pixels.get(start..start + w as usize).unwrap_or_default()
+    };
+    // The texel centers are at .5: weights from the position half a texel back.
+    let (u, v) = (walk.u - 0x8000, walk.v - 0x8000);
+    let (upper, lower) = (row(v >> 16), row((v >> 16) + 1));
+    let fy = ((v >> 8) & 0xff) as u32;
+    // The columns the walk reaches and the one after, as far as one past each edge: further
+    // out a column reads as the edge's.
+    let end = u + walk.du * last as i64;
+    let first = (u.min(end) >> 16).clamp(-1, w - 1);
+    let after = ((u.max(end) >> 16) + 1).clamp(first + 1, w);
+    let edge = |x: usize| {
+        let (a, b) = (upper.get(x), lower.get(x));
+        lerp(a.copied().unwrap_or(0), b.copied().unwrap_or(0), fy)
+    };
+    mixed.clear();
+    if first < 0 {
+        mixed.push(edge(0));
+    }
+    let inner = first.max(0) as usize..after.min(w - 1) as usize + 1;
+    let start = mixed.len();
+    mixed.resize(start + inner.len(), 0);
+    let (Some(out), Some(a), Some(b)) = (
+        mixed.get_mut(start..),
+        upper.get(inner.clone()),
+        lower.get(inner),
+    ) else {
+        return;
+    };
+    if fy == 0 {
+        out.copy_from_slice(a);
+    } else {
+        for ((m, a), b) in out.iter_mut().zip(a).zip(b) {
+            *m = lerp(*a, *b, fy);
+        }
+    }
+    if after == w {
+        mixed.push(edge(w as usize - 1));
+    }
+    let mut u = u;
+    for d in dst {
+        let i = ((u >> 16).clamp(first, after - 1) - first) as usize;
+        let fx = ((u >> 8) & 0xff) as u32;
+        let a = mixed.get(i).copied().unwrap_or(0);
+        let b = mixed.get(i + 1).copied().unwrap_or(0);
+        *d = lerp(a, b, fx);
+        u += walk.du;
+    }
+}
+
 /// Four texels per pixel weighted by distance (GL's `LINEAR` with `CLAMP_TO_EDGE`), with
 /// 8-bit weights.
+#[inline(always)]
 pub fn sample_bilinear(src: &Image, walk: Walk, dst: &mut [u32]) {
     let (w, h) = (src.width() as i64, src.height() as i64);
     if w == 0 || h == 0 {
@@ -304,6 +425,35 @@ mod tests {
         sample_bilinear(&image, walk, &mut out);
         sample_bilinear(&Image::new(0, 0), walk, &mut out);
         assert_eq!(out, [0; 6]);
+    }
+
+    #[test]
+    fn bilinear_along_a_row_matches_texel_by_texel() {
+        let mut image = Image::new(7, 3);
+        for (i, p) in image.pixels_mut().iter_mut().enumerate() {
+            let c = (i as u32 * 37) & 0xff;
+            *p = 0xff00_0000 | c << 16 | (255 - c) << 8 | (c * 3) & 0xff;
+        }
+        let walks = [
+            (0x8000, 0x1_4000, 0x1_0000),
+            (-0x3_2000, 0x2_c000, 0x5800),
+            (0x2_7000, 0x9000, 0x2_8000),
+            (0x6_0000, 0x1_0000, -0x1_3000),
+            (0x40_0000, -0x8_0000, 0x1_0000),
+            (-0x40_0000, 0x8_0000, 0x1_0000),
+        ];
+        for (u, v, du) in walks {
+            let walk = Walk { u, v, du, dv: 0 };
+            let (mut expected, mut out) = ([0u32; 11], [0u32; 11]);
+            sample_bilinear(&image, walk, &mut expected);
+            sample_bilinear_across(&image, walk, &mut out, &mut Vec::new());
+            for (e, o) in expected.iter().zip(&out) {
+                for shift in [0, 8, 16, 24] {
+                    let (e, o) = ((e >> shift) & 0xff, (o >> shift) & 0xff);
+                    assert!(e.abs_diff(o) <= 1, "{walk:?}: {e} against {o}");
+                }
+            }
+        }
     }
 
     #[test]

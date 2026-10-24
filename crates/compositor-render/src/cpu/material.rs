@@ -2,6 +2,7 @@
 //! (distances, lens, rims, coverage), which depends only on the shapes, and its color over a
 //! blurred backdrop, redone when the backdrop changes.
 
+use compositor_raster::fearless_simd::{Simd, dispatch};
 use compositor_raster::{CpuRenderer, Image};
 use smithay::backend::renderer::gles::Uniform;
 
@@ -416,7 +417,17 @@ impl Material {
         (len(n) > 0.0).then(|| normalize(n))
     }
 
+    /// The geometry of a row of pixels at `py`, from `x0` on (texture pixels), compiled for
+    /// the SIMD level of `S`.
+    #[inline(always)]
+    fn texel_row<S: Simd>(&self, _: S, x0: f32, py: f32, row: &mut [Texel]) {
+        for (x, texel) in row.iter_mut().enumerate() {
+            *texel = self.texel([x0 + x as f32 + 0.5, py]);
+        }
+    }
+
     /// The geometry of the pixel at `p` (texture pixels).
+    #[inline(always)]
     fn texel(&self, p: Vec2) -> Texel {
         let none = [0.0; 2];
         let sd = self.union_distance(p, 0.0, none);
@@ -502,6 +513,7 @@ impl Material {
     /// of them. Outside the shape the coverage is 0 and the backdrop black, which leaves the
     /// outline and the shadow, black: one formula for every pixel, with no branch, so that
     /// the loop vectorizes.
+    #[inline(always)]
     fn shade(&self, run: &Run, out: &mut [u32]) {
         let opaque = self.fallback[3] > 0.5;
         let saturation = if opaque { 1.0 } else { self.saturation };
@@ -606,8 +618,22 @@ impl Tap {
         }
     }
 
+    /// `reads` grown by the texels this tap reads, in a texture `width` wide.
+    fn reach(self, width: usize, reads: Option<[usize; 4]>) -> Option<[usize; 4]> {
+        let index = self.index as usize;
+        let (Some(x), Some(y)) = (index.checked_rem(width), index.checked_div(width)) else {
+            return reads;
+        };
+        let x1 = x + 1 + usize::from(self.across > 0);
+        let y1 = y + 1 + usize::from(self.down > 0);
+        Some(match reads {
+            Some([a, b, c, d]) => [a.min(x), b.min(y), c.max(x1), d.max(y1)],
+            None => [x, y, x1, y1],
+        })
+    }
+
     /// The backdrop there, premultiplied RGBA in 0–1: `bilinear` read through the steps.
-    #[inline]
+    #[inline(always)]
     fn read(self, pixels: &[u32]) -> [f32; 4] {
         let at = |i: u32| unpack(pixels.get(i as usize).copied().unwrap_or(0));
         let a = at(self.index);
@@ -640,6 +666,8 @@ pub(crate) struct Plan {
     /// `y`.
     split_taps: Vec<[Tap; 2]>,
     split_rows: Vec<usize>,
+    /// The texels the paint reads, `[x0, y0, x1, y1)`.
+    reads: Option<[usize; 4]>,
 }
 
 impl Plan {
@@ -653,15 +681,13 @@ impl Plan {
         tex_size: (usize, usize),
     ) -> Self {
         let mut texels = vec![Texel::default(); size.0.saturating_mul(size.1)];
+        let level = renderer.level();
         renderer.rows_costly(&mut texels, size.0, |y, row| {
             let py = (origin[1] as f32) + y as f32 + 0.5;
-            for (x, texel) in row.iter_mut().enumerate() {
-                let px = (origin[0] as f32) + x as f32 + 0.5;
-                *texel = material.texel([px, py]);
-            }
+            dispatch!(level, simd => material.texel_row(simd, origin[0] as f32, py, row));
         });
         let splits = material.splits();
-        let taps = texels
+        let taps: Vec<Tap> = texels
             .iter()
             .map(|t| Tap::new(t.sample, tex_size))
             .collect();
@@ -678,6 +704,17 @@ impl Plan {
                 ]);
             }
         }
+        // What the covered pixels read; an opaque fallback reads nothing.
+        let mut reads = None;
+        if material.fallback[3] <= 0.5 {
+            let covered = texels.iter().zip(&taps).filter(|(t, _)| t.coverage > 0.0);
+            for tap in covered
+                .map(|(_, tap)| tap)
+                .chain(split_taps.iter().flatten())
+            {
+                reads = tap.reach(tex_size.0, reads);
+            }
+        }
         Self {
             material,
             width: size.0,
@@ -686,7 +723,14 @@ impl Plan {
             taps,
             split_taps,
             split_rows,
+            reads,
         }
+    }
+
+    /// The texels of the backdrop the paint reads, `[x0, y0, x1, y1)`: the rest does not
+    /// matter.
+    pub fn reads(&self) -> Option<[usize; 4]> {
+        self.reads
     }
 
     /// The size of the texture the plan reads.
@@ -698,7 +742,22 @@ impl Plan {
     pub fn paint(&self, renderer: &CpuRenderer, backdrop: &Image) -> Image {
         let height = self.texels.len().checked_div(self.width).unwrap_or(0);
         let mut out = Image::new(self.width, height);
-        let width = self.width;
+        // A backdrop of another size than the taps were made for reads nothing.
+        let pixels = if (backdrop.width(), backdrop.height()) == self.tex_size {
+            backdrop.pixels()
+        } else {
+            &[]
+        };
+        let level = renderer.level();
+        renderer.rows_costly(out.pixels_mut(), self.width, |y, row| {
+            dispatch!(level, simd => self.paint_row(simd, pixels, y, row));
+        });
+        out
+    }
+
+    /// Row `y` of `paint`, compiled for the SIMD level of `S`.
+    #[inline(always)]
+    fn paint_row<S: Simd>(&self, _: S, pixels: &[u32], y: usize, row: &mut [u32]) {
         let material = &self.material;
         let fallback = (material.fallback[3] > 0.5).then_some([
             material.fallback[0],
@@ -706,58 +765,49 @@ impl Plan {
             material.fallback[2],
         ]);
         let splits = material.splits();
-        // A backdrop of another size than the taps were made for reads nothing.
-        let pixels = if (backdrop.width(), backdrop.height()) == self.tex_size {
-            backdrop.pixels()
-        } else {
-            &[]
-        };
-        renderer.rows_costly(out.pixels_mut(), width, |y, row| {
-            let span = y * width..(y + 1) * width;
-            let texels = self.texels.get(span.clone()).unwrap_or_default();
-            let taps = self.taps.get(span).unwrap_or_default();
-            let first = self.split_rows.get(y).copied().unwrap_or(usize::MAX);
-            let mut split_taps = self.split_taps.get(first..).unwrap_or_default().iter();
-            let mut run = Run::default();
-            for (out, (texels, taps)) in row
-                .chunks_mut(RUN)
-                .zip(texels.chunks(RUN).zip(taps.chunks(RUN)))
-            {
-                for (i, (texel, tap)) in texels.iter().zip(taps).enumerate() {
-                    let split = splits && texel.split != [0.0, 0.0];
-                    let side = if split { split_taps.next() } else { None };
-                    let [r, g, b] = match (texel.coverage > 0.0, fallback, side) {
-                        (false, ..) => [0.0; 3],
-                        (true, Some(color), _) => color,
-                        (true, None, Some([red, blue])) => [
-                            red.read(pixels)[0],
-                            tap.read(pixels)[1],
-                            blue.read(pixels)[2],
-                        ],
-                        (true, None, None) => {
-                            let [r, g, b, _] = tap.read(pixels);
-                            [r, g, b]
-                        }
-                    };
-                    let set = |lane: &mut [f32; RUN], value: f32| {
-                        if let Some(lane) = lane.get_mut(i) {
-                            *lane = value;
-                        }
-                    };
-                    set(&mut run.r, r);
-                    set(&mut run.g, g);
-                    set(&mut run.b, b);
-                    set(&mut run.coverage, texel.coverage);
-                    set(&mut run.outline, texel.outline);
-                    set(&mut run.offset_in, texel.offset_in);
-                    set(&mut run.in_band, texel.in_band);
-                    set(&mut run.lit, texel.lit);
-                    set(&mut run.shadow, texel.shadow);
-                }
-                material.shade(&run, out);
+        let span = y * self.width..(y + 1) * self.width;
+        let texels = self.texels.get(span.clone()).unwrap_or_default();
+        let taps = self.taps.get(span).unwrap_or_default();
+        let first = self.split_rows.get(y).copied().unwrap_or(usize::MAX);
+        let mut split_taps = self.split_taps.get(first..).unwrap_or_default().iter();
+        let mut run = Run::default();
+        for (out, (texels, taps)) in row
+            .chunks_mut(RUN)
+            .zip(texels.chunks(RUN).zip(taps.chunks(RUN)))
+        {
+            for (i, (texel, tap)) in texels.iter().zip(taps).enumerate() {
+                let split = splits && texel.split != [0.0, 0.0];
+                let side = if split { split_taps.next() } else { None };
+                let [r, g, b] = match (texel.coverage > 0.0, fallback, side) {
+                    (false, ..) => [0.0; 3],
+                    (true, Some(color), _) => color,
+                    (true, None, Some([red, blue])) => [
+                        red.read(pixels)[0],
+                        tap.read(pixels)[1],
+                        blue.read(pixels)[2],
+                    ],
+                    (true, None, None) => {
+                        let [r, g, b, _] = tap.read(pixels);
+                        [r, g, b]
+                    }
+                };
+                let set = |lane: &mut [f32; RUN], value: f32| {
+                    if let Some(lane) = lane.get_mut(i) {
+                        *lane = value;
+                    }
+                };
+                set(&mut run.r, r);
+                set(&mut run.g, g);
+                set(&mut run.b, b);
+                set(&mut run.coverage, texel.coverage);
+                set(&mut run.outline, texel.outline);
+                set(&mut run.offset_in, texel.offset_in);
+                set(&mut run.in_band, texel.in_band);
+                set(&mut run.lit, texel.lit);
+                set(&mut run.shadow, texel.shadow);
             }
-        });
-        out
+            material.shade(&run, out);
+        }
     }
 }
 

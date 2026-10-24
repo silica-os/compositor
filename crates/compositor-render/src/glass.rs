@@ -832,8 +832,77 @@ struct CpuMaterial {
     painted: Option<SilicaTexture>,
 }
 
-/// The material of the group `shapes` on the CPU (`material.frag` run once): from `cache` if it
-/// holds the same shapes, else made; kept in `used`.
+/// Where the group `shapes` draws inside `bbox`: the smooth union goes out of the regions by at
+/// most k / 4 = merge_pt / 2, the shadow by its reach.
+fn group_area(
+    shapes: &[PhysicalRegion],
+    bbox: Rectangle<i32, Physical>,
+) -> Option<Rectangle<i32, Physical>> {
+    let bulge = shapes.first()?.bleed();
+    shapes
+        .iter()
+        .map(PhysicalRegion::bounds)
+        .reduce(|a, b| a.merge(b))
+        .and_then(|area| {
+            Rectangle::new(
+                area.loc - Point::from((bulge, bulge)),
+                area.size + Size::from((bulge.saturating_mul(2), bulge.saturating_mul(2))),
+            )
+            .intersection(bbox)
+        })
+        .filter(|area| !area.is_empty())
+}
+
+/// `areas` (`[x0, y0, x1, y1)` per blur) with `area` added to the one of `key`.
+fn add_area(areas: &mut Vec<(BlurKey, [usize; 4])>, key: BlurKey, area: [usize; 4]) {
+    let [x0, y0, x1, y1] = area;
+    match areas.iter_mut().find(|(k, _)| *k == key) {
+        Some((_, [a, b, c, d])) => {
+            *a = (*a).min(x0);
+            *b = (*b).min(y0);
+            *c = (*c).max(x1);
+            *d = (*d).max(y1);
+        }
+        None => areas.push((key, area)),
+    }
+}
+
+/// The geometry of the material of the group `shapes` on the CPU (`material.frag` up to the
+/// backdrop sample), over a texture `tex_size` large: from `cache` if it holds the same
+/// shapes, else made.
+fn cpu_plan(
+    renderer: &CpuRenderer,
+    cache: &mut Vec<CpuMaterial>,
+    shapes: &[PhysicalRegion],
+    bbox: Rectangle<i32, Physical>,
+    area: Rectangle<i32, Physical>,
+    fallback: bool,
+    tex_size: (usize, usize),
+) -> CpuMaterial {
+    let found = cache.iter().position(|m| {
+        m.fallback == fallback
+            && m.plan.tex_size() == tex_size
+            && m.shapes.len() == shapes.len()
+            && m.shapes.iter().zip(shapes).all(|(a, b)| a.same_shape(b))
+    });
+    match found {
+        Some(i) => cache.swap_remove(i),
+        None => {
+            let material = Material::new(&material_uniforms(shapes, bbox, fallback));
+            let origin = area.loc - bbox.loc;
+            let size = (area.size.w.max(0) as usize, area.size.h.max(0) as usize);
+            CpuMaterial {
+                shapes: shapes.to_vec(),
+                fallback,
+                plan: Plan::new(renderer, material, [origin.x, origin.y], size, tex_size),
+                painted: None,
+            }
+        }
+    }
+}
+
+/// The material of the group `shapes` on the CPU (`material.frag` run once): planned by
+/// `cpu_plan`, painted over `blurred` if it was not yet; kept in `used`.
 #[allow(clippy::too_many_arguments)]
 fn cpu_material(
     renderer: &CpuRenderer,
@@ -849,26 +918,7 @@ fn cpu_material(
         let image = blurred.read();
         (image.width(), image.height())
     };
-    let found = cache.iter().position(|m| {
-        m.fallback == fallback
-            && m.plan.tex_size() == tex_size
-            && m.shapes.len() == shapes.len()
-            && m.shapes.iter().zip(shapes).all(|(a, b)| a.same_shape(b))
-    });
-    let mut entry = match found {
-        Some(i) => cache.swap_remove(i),
-        None => {
-            let material = Material::new(&material_uniforms(shapes, bbox, fallback));
-            let origin = area.loc - bbox.loc;
-            let size = (area.size.w.max(0) as usize, area.size.h.max(0) as usize);
-            CpuMaterial {
-                shapes: shapes.to_vec(),
-                fallback,
-                plan: Plan::new(renderer, material, [origin.x, origin.y], size, tex_size),
-                painted: None,
-            }
-        }
-    };
+    let mut entry = cpu_plan(renderer, cache, shapes, bbox, area, fallback, tex_size);
     let texture = match &entry.painted {
         Some(texture) => texture.clone(),
         None => {
@@ -976,6 +1026,38 @@ impl GlassCache {
             let start = Instant::now();
             let sharp = render_to_texture(renderer, behind, bbox, scale, clear_color)?;
             add_time(|t| &mut t.backdrop, start);
+            // The CPU materials keep their geometry, to be painted over the new textures. They
+            // are planned before the blur, which makes only the texels they read.
+            let start = Instant::now();
+            let mut materials = Vec::new();
+            if let Some(cached) = state.as_mut().filter(|cached| cached.bbox == bbox) {
+                materials = std::mem::take(&mut cached.materials);
+                for material in &mut materials {
+                    material.painted = None;
+                }
+            }
+            let mut reads: Option<Vec<(BlurKey, [usize; 4])>> = None;
+            if let SilicaRenderer::Cpu(cpu) = &*renderer {
+                let fallback = quality == GlassQuality::Opaque;
+                let tex_size = (bbox.size.w.max(0) as usize, bbox.size.h.max(0) as usize);
+                let mut planned = Vec::new();
+                let mut areas = Vec::new();
+                for shapes in groups(regions) {
+                    let (Some(first), Some(area)) = (shapes.first(), group_area(&shapes, bbox))
+                    else {
+                        continue;
+                    };
+                    let entry =
+                        cpu_plan(cpu, &mut materials, &shapes, bbox, area, fallback, tex_size);
+                    if let Some(read) = entry.plan.reads() {
+                        add_area(&mut areas, first.blur_key(), read);
+                    }
+                    planned.push(entry);
+                }
+                materials = planned;
+                reads = Some(areas);
+            }
+            add_time(|t| &mut t.material, start);
             let start = Instant::now();
             let mut textures: Vec<(BlurKey, SilicaTexture)> = Vec::new();
             for region in regions {
@@ -983,37 +1065,24 @@ impl GlassCache {
                 if textures.iter().any(|(k, _)| *k == key) {
                     continue;
                 }
-                let blurred = blur_with(renderer, &sharp, bbox.size, key, scale)?;
+                // On the CPU only what the materials read; nothing if none reads it.
+                let area = reads.as_ref().map(|reads| {
+                    reads
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map_or([0; 4], |(_, area)| *area)
+                });
+                let blurred = blur_with(renderer, &sharp, bbox.size, key, scale, area)?;
                 textures.push((key, blurred));
             }
             add_time(|t| &mut t.blur, start);
             let count = groups(regions).len();
-            // The CPU materials keep their geometry, to be painted over the new textures.
-            let kept = |cached: &mut Cached| {
-                let mut materials = std::mem::take(&mut cached.materials);
-                materials.retain(|_| cached.bbox == bbox);
-                for material in &mut materials {
-                    material.painted = None;
-                }
-                materials
-            };
-            let (ids, mut commit, materials) = match state.take() {
-                Some(mut cached) if cached.ids.len() == count => {
-                    let materials = kept(&mut cached);
-                    (cached.ids, cached.commit, materials)
-                }
-                Some(mut cached) => {
-                    let materials = kept(&mut cached);
-                    (
-                        (0..count).map(|_| Id::new()).collect(),
-                        cached.commit,
-                        materials,
-                    )
-                }
+            let (ids, mut commit) = match state.take() {
+                Some(cached) if cached.ids.len() == count => (cached.ids, cached.commit),
+                Some(cached) => ((0..count).map(|_| Id::new()).collect(), cached.commit),
                 None => (
                     (0..count).map(|_| Id::new()).collect(),
                     CommitCounter::default(),
-                    Vec::new(),
                 ),
             };
             commit.increment();
@@ -1045,22 +1114,7 @@ impl GlassCache {
             let Some((_, texture)) = cached.textures.iter().find(|(k, _)| *k == key) else {
                 continue;
             };
-            // The smooth union goes out of the regions by at most k / 4 = merge_pt / 2, the
-            // shadow by its reach.
-            let bulge = first.bleed();
-            let Some(area) = shapes
-                .iter()
-                .map(PhysicalRegion::bounds)
-                .reduce(|a, b| a.merge(b))
-                .and_then(|area| {
-                    Rectangle::new(
-                        area.loc - Point::from((bulge, bulge)),
-                        area.size + Size::from((bulge.saturating_mul(2), bulge.saturating_mul(2))),
-                    )
-                    .intersection(cached.bbox)
-                })
-                .filter(|area| !area.is_empty())
-            else {
+            let Some(area) = group_area(&shapes, cached.bbox) else {
                 continue;
             };
             let start = Instant::now();
@@ -1459,13 +1513,14 @@ fn blur_passes(
     Ok(current)
 }
 
-/// `blur` on either renderer.
+/// `blur` on either renderer; on the CPU only over `area` (`[x0, y0, x1, y1)`), if given.
 fn blur_with(
     renderer: &mut SilicaRenderer,
     sharp: &SilicaTexture,
     size: Size<i32, Physical>,
     key: BlurKey,
     scale: f64,
+    area: Option<[usize; 4]>,
 ) -> Result<SilicaTexture, SilicaError> {
     match (renderer, sharp) {
         (SilicaRenderer::Gles(renderer), SilicaTexture::Gles(sharp)) => {
@@ -1479,13 +1534,14 @@ fn blur_with(
             )?))
         }
         (SilicaRenderer::Cpu(renderer), SilicaTexture::Cpu(sharp)) => {
-            let image = crate::cpu::blur::blur(
+            let sharp = sharp.read();
+            let all = [0, 0, sharp.width(), sharp.height()];
+            let image = crate::cpu::blur::blur_area(
                 renderer,
-                &sharp.read(),
-                key.sigma * scale,
-                key.factor,
-                key.sharp,
+                &sharp,
+                (key.sigma * scale, key.factor, key.sharp),
                 BlurEdge::Clamp,
+                area.unwrap_or(all),
             );
             Ok(SilicaTexture::Cpu(CpuTexture::from_image(image)?))
         }

@@ -2,7 +2,8 @@
 //! (`filter.frag`) as shaders of the texels drawn, the genie (`genie.frag`) as an effect that
 //! samples its snapshot, the bar tone (`tone.frag`) applied once to its texture.
 
-use compositor_raster::{Band, CpuRenderer, CpuTexture, Effect, Image, Rect, Shader};
+use compositor_raster::fearless_simd::{Level, Simd, dispatch};
+use compositor_raster::{Band, CpuRenderer, CpuTexture, Effect, Image, Rect, Shader, Walk};
 use smithay::backend::renderer::gles::Uniform;
 
 use super::{Uniforms, bilinear, clamp01, mix, pack, unpack};
@@ -94,6 +95,7 @@ impl Shader for Corners {
 pub(crate) struct Filter {
     mode: f32,
     contrast: f32,
+    level: Level,
 }
 
 impl Filter {
@@ -102,9 +104,11 @@ impl Filter {
         Self {
             mode: u.f1("mode"),
             contrast: u.f1("contrast"),
+            level: Level::new(),
         }
     }
 
+    #[inline(always)]
     fn filter(&self, p: u32) -> u32 {
         let [r, g, b, a] = unpack(p);
         let mut rgb = if a > 0.0 {
@@ -124,11 +128,19 @@ impl Filter {
     }
 }
 
-impl Shader for Filter {
-    fn shade(&self, _y: i32, _x0: i32, row: &mut [u32]) {
+impl Filter {
+    /// `filter` over `row`, compiled for the SIMD level of `S`.
+    #[inline(always)]
+    fn filter_row<S: Simd>(&self, _: S, row: &mut [u32]) {
         for p in row {
             *p = self.filter(*p);
         }
+    }
+}
+
+impl Shader for Filter {
+    fn shade(&self, _y: i32, _x0: i32, row: &mut [u32]) {
+        dispatch!(self.level, simd => self.filter_row(simd, row));
     }
 
     fn keeps_opaque(&self) -> bool {
@@ -168,34 +180,87 @@ impl Genie {
         }
     }
 
-    fn color(&self, image: &Image, x: f32, y: f32) -> [f32; 4] {
+    /// The rows of `rect` (`genie.frag`). What depends on the row alone is worked out once per
+    /// row. Inside the window's edges the coverage is the row's and the texture coordinate moves
+    /// by the same step from pixel to pixel: there the raster's bilinear sampler walks the
+    /// snapshot. Only the pixel or two on each edge go through the shader's arithmetic.
+    fn draw_rows(&self, image: &Image, band: &mut Band<'_>, rect: Rect) {
         let (window, target, motion) = (self.window, self.target, self.motion);
         let ease = |x: f32| {
             let x = clamp01(x);
             x * x * (3.0 - 2.0 * x)
         };
+        let [u0, v0, du, dv] = self.frame_uv;
+        let (w, h) = (image.width() as f32, image.height() as f32);
         let top = mix(window[1], target[1], motion[1]);
         let bottom = mix(window[3], target[3], motion[2]);
         let span = target[1] - window[1];
-        let u = if span.abs() < 1.0 {
-            1.0
-        } else {
-            (y - window[1]) / span
-        };
-        let k = motion[0] * ease(u);
-        let left = mix(window[0], target[0], k);
-        let right = mix(window[2], target[2], k);
-        let coverage =
-            clamp01((x - left).min(right - x) + 0.5) * clamp01((y - top).min(bottom - y) + 0.5);
-        if coverage <= 0.0 {
-            return [0.0; 4];
+        let kernels = band.kernels();
+        let mut row = vec![0u32; rect.width().max(0) as usize];
+        // The centre of the rect's first column, from the effect's origin.
+        let base = f64::from(rect.x0) + 0.5 - self.origin[0];
+        for y in rect.y0..rect.y1 {
+            let py = (f64::from(y) + 0.5 - self.origin[1]) as f32;
+            let across = clamp01((py - top).min(bottom - py) + 0.5);
+            if across <= 0.0 {
+                continue;
+            }
+            let u = if span.abs() < 1.0 {
+                1.0
+            } else {
+                (py - window[1]) / span
+            };
+            let k = motion[0] * ease(u);
+            let left = mix(window[0], target[0], k);
+            let right = mix(window[2], target[2], k);
+            let width = (right - left).max(0.001);
+            let qy = clamp01((py - top) / (bottom - top).max(0.001));
+            let v = (v0 + qy * dv) * h;
+            let (l, r) = (f64::from(left), f64::from(right));
+            // The pixels the window can cover, a pixel wider on each side than its edges, and
+            // within them the ones it covers whole.
+            let at = |x: f64| x.max(0.0) as usize;
+            let last = at((r + 1.0 - base).ceil()).min(row.len());
+            let first = at((l - 1.0 - base).floor()).min(last);
+            let inner_first = at((l + 0.5 - base).ceil()).clamp(first, last);
+            let inner_last = at((r - 0.5 - base).floor() + 1.0).clamp(inner_first, last);
+            let edge = |i: usize| {
+                let px = (base + i as f64) as f32;
+                let coverage = clamp01((px - left).min(right - px) + 0.5) * across;
+                if coverage <= 0.0 {
+                    return 0;
+                }
+                let qx = clamp01((px - left) / width);
+                let texel = bilinear(image, (u0 + qx * du) * w, v);
+                pack(texel.map(|c| c * self.alpha * coverage))
+            };
+            let segments = [
+                (first, inner_first, false),
+                (inner_first, inner_last, true),
+                (inner_last, last, false),
+            ];
+            for (start, end, inner) in segments {
+                let Some(out) = row.get_mut(start..end).filter(|out| !out.is_empty()) else {
+                    continue;
+                };
+                let alpha = if inner {
+                    let step = f64::from(du * w) / f64::from(width);
+                    let x = f64::from(u0 * w) + (base + start as f64 - l) * step;
+                    kernels.bilinear(image, Walk::new([x, f64::from(v)], [step, 0.0]), out);
+                    (self.alpha * across * 255.0 + 0.5).min(255.0) as u32
+                } else {
+                    for (i, p) in (start..).zip(out.iter_mut()) {
+                        *p = edge(i);
+                    }
+                    255
+                };
+                let Some(dst) = band.span_mut(y, rect.x0 + start as i32, rect.x0 + end as i32)
+                else {
+                    continue;
+                };
+                kernels.over(dst, out, alpha);
+            }
         }
-        let qx = clamp01((x - left) / (right - left).max(0.001));
-        let qy = clamp01((y - top) / (bottom - top).max(0.001));
-        let [u0, v0, du, dv] = self.frame_uv;
-        let (w, h) = (image.width() as f32, image.height() as f32);
-        let texel = bilinear(image, (u0 + qx * du) * w, (v0 + qy * dv) * h);
-        texel.map(|c| c * self.alpha * coverage)
     }
 }
 
@@ -205,18 +270,7 @@ impl Effect for Genie {
         let Some(image) = self.snapshot.try_read() else {
             return;
         };
-        let kernels = band.kernels();
-        let mut row = vec![0u32; rect.width().max(0) as usize];
-        for y in rect.y0..rect.y1 {
-            let py = (f64::from(y) + 0.5 - self.origin[1]) as f32;
-            for (i, out) in row.iter_mut().enumerate() {
-                let px = (f64::from(rect.x0) + i as f64 + 0.5 - self.origin[0]) as f32;
-                *out = pack(self.color(&image, px, py));
-            }
-            if let Some(dst) = band.span_mut(y, rect.x0, rect.x1) {
-                kernels.over(dst, &row, 255);
-            }
-        }
+        self.draw_rows(&image, band, rect);
     }
 }
 
@@ -301,6 +355,7 @@ mod tests {
         let filter = Filter {
             mode: 1.0,
             contrast: 1.0,
+            level: Level::new(),
         };
         assert_eq!(filter.filter(0xff00_0000), 0xffff_ffff);
         assert_eq!(filter.filter(0x8080_8080) >> 24, 0x80);

@@ -12,7 +12,7 @@ use smithay::backend::renderer::TextureFilter;
 
 use crate::CpuTexture;
 use crate::image::{Image, Rect, dim, index};
-use crate::kernels::{Kernels, Walk, sample_bilinear, sample_nearest};
+use crate::kernels::{Kernels, Walk, fixed, sample_nearest};
 
 /// Rows per band: 16 rows of a 1280-wide target are 80 KiB, which stay in L2 while every
 /// command of the frame runs on them.
@@ -282,7 +282,7 @@ impl DisplayList {
                                     };
                                     match filter {
                                         TextureFilter::Linear => {
-                                            sample_bilinear(src, walk, scratch)
+                                            kernels.bilinear(src, walk, scratch)
                                         }
                                         TextureFilter::Nearest => {
                                             sample_nearest(src, walk, scratch)
@@ -356,11 +356,4 @@ fn each_row(band: &mut Band<'_>, rect: Rect, mut f: impl FnMut(&mut [u32], i32))
             f(dst, y);
         }
     }
-}
-
-/// 16.16 fixed point, saturating far outside any texture.
-fn fixed(v: f64) -> i64 {
-    (v * 65536.0)
-        .round()
-        .clamp(-(1i64 << 46) as f64, (1i64 << 46) as f64) as i64
 }
