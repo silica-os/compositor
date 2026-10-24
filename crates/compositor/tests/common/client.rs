@@ -173,7 +173,7 @@ impl Dispatch<WlRegistry, ()> for App {
                     state.layer_shell = Some(registry.bind(name, 1, qh, ()));
                 }
                 "silica_menu_bar_manager_v1" => {
-                    state.menu_bar = Some(registry.bind(name, 1, qh, ()));
+                    state.menu_bar = Some(registry.bind(name, 2, qh, ()));
                 }
                 "zxdg_exporter_v2" => state.exporter = Some(registry.bind(name, 1, qh, ())),
                 "zxdg_importer_v2" => state.importer = Some(registry.bind(name, 1, qh, ())),
@@ -1740,6 +1740,16 @@ impl TestWindow {
                 StripObject::Item(item) => item.destroy(),
             }
             surface.destroy();
+        }
+        self.queue.roundtrip(&mut self.app).unwrap();
+    }
+
+    /// Asks for an item of the app menu that the compositor runs, from the titles added as
+    /// `index` with `add_to_menu_bar`.
+    #[allow(dead_code)]
+    pub fn app_action(&mut self, index: usize, action: silica_menu_titles_v1::AppAction) {
+        if let Some((_, StripObject::Titles(titles), _)) = self.strip.get(index) {
+            titles.app_action(action);
         }
         self.queue.roundtrip(&mut self.app).unwrap();
     }

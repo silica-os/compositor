@@ -88,7 +88,7 @@ fn surface_width(surface: &WlSurface) -> i32 {
 
 impl MenuBar {
     pub fn new(dh: &DisplayHandle) -> Self {
-        dh.create_global::<State, SilicaMenuBarManagerV1, _>(1, ());
+        dh.create_global::<State, SilicaMenuBarManagerV1, _>(2, ());
         Self::default()
     }
 
@@ -490,7 +490,7 @@ impl Dispatch<SilicaMenuBarManagerV1, ()> for State {
 impl Dispatch<SilicaMenuTitlesV1, StripData> for State {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         _titles: &SilicaMenuTitlesV1,
         request: silica_menu_titles_v1::Request,
         data: &StripData,
@@ -500,6 +500,15 @@ impl Dispatch<SilicaMenuTitlesV1, StripData> for State {
         match request {
             silica_menu_titles_v1::Request::GetPopup { popup } => {
                 attach_popup(state, &data.surface, &popup);
+            }
+            // Only from the titles on screen: the frontmost app's.
+            silica_menu_titles_v1::Request::AppAction { action } => {
+                if let WEnum::Value(action) = action
+                    && state.menu_bar.front.as_ref() == Some(&client.id())
+                {
+                    state.app_action(action);
+                    state.menu_bar_update();
+                }
             }
             silica_menu_titles_v1::Request::AckConfigure { .. }
             | silica_menu_titles_v1::Request::Destroy => {}

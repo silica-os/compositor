@@ -23,7 +23,7 @@
     is that of their buffer, and they get the strip's height in configure.
   </description>
 
-  <interface name="silica_menu_bar_manager_v1" version="1">
+  <interface name="silica_menu_bar_manager_v1" version="2">
     <description summary="gives surfaces a place in the menu bar"/>
 
     <request name="destroy" type="destructor">
@@ -61,7 +61,7 @@
     </request>
   </interface>
 
-  <interface name="silica_menu_titles_v1" version="1">
+  <interface name="silica_menu_titles_v1" version="2">
     <description summary="an app's menu titles in the menu bar"/>
 
     <request name="destroy" type="destructor">
@@ -94,6 +94,24 @@
         The popup was made with a null parent; it is positioned against this surface.
       </description>
       <arg name="popup" type="object" interface="xdg_popup"/>
+    </request>
+
+    <enum name="app_action" since="2">
+      <entry name="hide" value="0" summary="Hide: the client's windows leave the screen"/>
+      <entry name="hide_others" value="1" summary="Hide Others: every other app's do"/>
+      <entry name="show_all" value="2" summary="Show All: every hidden app comes back"/>
+      <entry name="bring_all_to_front" value="3"
+             summary="Bring All to Front: the client's windows come forward in their order"/>
+    </enum>
+
+    <request name="app_action" since="2">
+      <description summary="run an item of the app menu that the compositor owns">
+        Hide Others and Show All act on other apps, and hiding or raising the client's own
+        windows changes the stacking and the focus: the compositor runs them, as it does
+        for its own shortcuts. Only while the titles are shown (the client is frontmost);
+        otherwise the request is ignored.
+      </description>
+      <arg name="action" type="uint" enum="app_action"/>
     </request>
   </interface>
 

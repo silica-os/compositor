@@ -14,6 +14,7 @@ use common::client::{PopupSpec, TestWindow};
 use common::{Headless, WIDTH, pixel, screenshot};
 use serde_json::Value;
 use silica_control::commands::{INPUT_CLICK, MENU_BAR, WINDOW_LIST, WindowInfo};
+use silica_protocols::menu_bar::client::silica_menu_titles_v1::AppAction;
 
 const BLUE: [u8; 4] = [0xff, 0, 0, 0xff];
 
@@ -154,4 +155,53 @@ fn a_menu_hangs_from_its_title_and_stays_on_screen() {
         r > 200 && g < 60 && b < 60,
         "not the red menu at ({x}, 60): {r} {g} {b}"
     );
+}
+
+#[test]
+fn the_front_app_hides_and_shows_apps_from_its_menu() {
+    let compositor = Headless::start("menu-bar-app-actions");
+    let app = |id: &str| common::client::APP_ID.with(|a| *a.borrow_mut() = id.to_owned());
+    app("org.example.First");
+    let mut first = TestWindow::open(&compositor.wayland, "first");
+    let first_titles = first.add_to_menu_bar(None, 100, BLUE);
+    app("org.example.Second");
+    let mut second = TestWindow::open_sized(&compositor.wayland, "second", (240, 140));
+    let second_titles = second.add_to_menu_bar(None, 100, BLUE);
+    let list: Vec<WindowInfo> =
+        serde_json::from_value(compositor.client().call(WINDOW_LIST, Value::Null).unwrap())
+            .unwrap();
+    let w = list
+        .iter()
+        .find(|w| w.title.as_deref() == Some("second"))
+        .unwrap();
+    let small = list
+        .iter()
+        .find(|w| w.title.as_deref() == Some("first"))
+        .unwrap();
+    // A corner of the big window, clear of the small one.
+    let (x, y) = ((w.x + w.width - 8) as u32, (w.y + w.height - 8) as u32);
+    assert!(
+        x as i32 >= small.x + small.width || y as i32 >= small.y + small.height,
+        "{list:?}"
+    );
+    let at = |c: &Headless| pixel(&screenshot(c), x, y);
+    let shown = at(&compositor);
+
+    // Only the app in front asks: the first's request does nothing.
+    first.app_action(first_titles, AppAction::HideOthers);
+    assert_eq!(at(&compositor), shown);
+
+    // Hide: the second app leaves the screen and the first comes to the front.
+    second.app_action(second_titles, AppAction::Hide);
+    assert_ne!(at(&compositor), shown);
+    assert_eq!(first.titles_state().1, Some(true));
+
+    // Show All brings it back, behind the app in front.
+    first.app_action(first_titles, AppAction::ShowAll);
+    assert_eq!(at(&compositor), shown);
+    assert_eq!(first.titles_state().1, Some(true));
+
+    // Hide Others takes it away again.
+    first.app_action(first_titles, AppAction::HideOthers);
+    assert_ne!(at(&compositor), shown);
 }

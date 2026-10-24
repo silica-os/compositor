@@ -4,6 +4,7 @@
 //! activating one of them (the Dock, the app switcher, the Window menu) brings the whole app
 //! back. Minimized windows stay in the Dock.
 
+use silica_protocols::menu_bar::server::silica_menu_titles_v1::AppAction;
 use smithay::desktop::Window;
 use smithay::utils::{Logical, Point};
 
@@ -102,6 +103,41 @@ impl State {
             self.space.raise_element(&front, true);
         }
         count
+    }
+
+    /// An item of the app menu the compositor runs (`silica_menu_titles_v1.app_action`) for
+    /// the frontmost app.
+    pub fn app_action(&mut self, action: AppAction) {
+        let Some(app) = self.front_app_id() else {
+            return;
+        };
+        match action {
+            AppAction::Hide => {
+                self.hide_app(&app);
+            }
+            AppAction::HideOthers => {
+                self.hide_other_apps();
+            }
+            AppAction::ShowAll => {
+                self.show_all_apps();
+            }
+            AppAction::BringAllToFront => {
+                // The app's windows come forward in their order, the focused one on top.
+                let same: Vec<Window> = self
+                    .space
+                    .elements()
+                    .filter(|w| window_app(w).as_deref() == Some(app.as_str()))
+                    .cloned()
+                    .collect();
+                for w in &same {
+                    self.space.raise_element(w, false);
+                }
+                if let Some(top) = self.focused_window().or_else(|| same.last().cloned()) {
+                    self.focus_window(Some(top));
+                }
+            }
+            _ => {}
+        }
     }
 
     /// A window of a hidden app is asked for (activated): its app comes back first.
